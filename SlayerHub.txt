@@ -1,5 +1,5 @@
 --[[
-    SlayerHub - versão didática / tolerante a falhas
+    SlayerHub - Xeno PC STABLE / tolerante a falhas
 
     Objetivos das alterações:
     1. Mostrar no console onde a inicialização falha.
@@ -13,8 +13,21 @@
     Quando uma API não existir, somente o recurso que depende dela é ignorado/desativado.
 ]]
 
+-- Captura erros síncronos do arquivo principal e mostra uma mensagem útil no console.
+local __SLAYER_MAIN_OK, __SLAYER_MAIN_ERROR = xpcall(function()
+
+
 local __SLAYER_PREFIX = "[SlayerHub/Debug]"
 local __SLAYER_WARNED = {}
+
+-- MODO ESTÁVEL PARA PC/XENO:
+-- O Koby é outro script completo carregado da internet e pode criar threads próprias.
+-- Ele fica DESLIGADO por padrão para impedir que um erro dele apareça como
+-- `CoreGui.<numero>:1: attempt to call a nil value` e pareça ser deste arquivo.
+local ENABLE_KOBY_AUTOLOAD = false
+
+-- Se true, recursos opcionais incompatíveis são ignorados em vez de parar o hub.
+local COMPATIBILITY_SAFE_MODE = true
 
 local function DebugPrint(section, ...)
     print(__SLAYER_PREFIX, "[" .. tostring(section) .. "]", ...)
@@ -343,9 +356,15 @@ task.spawn(function()
 end)
 
 -- Auto-load externo também fica isolado.
--- O arquivo Koby atual usa getupvalue/setupvalue/getgc/iscclosure/hookfunction/getsenv.
--- Se alguma dessas APIs não existir, pulamos SOMENTE o auto-load para evitar erro de API.
+-- IMPORTANTE: desligado por padrão no modo estável.
+-- O Koby é um segundo script independente e pode gerar erros assíncronos que
+-- não podem ser capturados pelo pcall deste arquivo depois que ele cria task.spawn/connections.
 task.spawn(function()
+    if not ENABLE_KOBY_AUTOLOAD then
+        DebugPrint("AutoLoad/Koby", "DESATIVADO no modo estável. O SlayerHub continuará sem ele.")
+        return
+    end
+
     local required = {"getupvalue", "setupvalue", "getgc", "iscclosure", "hookfunction", "getsenv", "debug_getinfo"}
     local missing = {}
     for _, apiName in ipairs(required) do
@@ -355,14 +374,18 @@ task.spawn(function()
     end
 
     if #missing > 0 then
-        DebugWarn("AutoLoad/Koby", "Auto-load desativado neste executor. APIs ausentes: " .. table.concat(missing, ", "))
+        DebugWarn("AutoLoad/Koby", "Auto-load cancelado. APIs ausentes: " .. table.concat(missing, ", "))
         return
     end
 
-    SafeHttpLoad(
+    DebugPrint("AutoLoad/Koby", "iniciando por opção explícita...")
+    local result = SafeHttpLoad(
         "https://raw.githubusercontent.com/AnhDangNhoEm/TuanAnhIOS/refs/heads/main/koby",
         "AutoLoad/Koby"
     )
+    if result == nil then
+        DebugWarn("AutoLoad/Koby", "não retornou um resultado utilizável. O hub principal continuará.")
+    end
 end)
 DebugPrint("Bootstrap", "Inicialização principal concluída; verificando PlayerGui.Main.Loading.")
 local playerGui = plr:FindFirstChild("PlayerGui") or plr:WaitForChild("PlayerGui", 30)
@@ -400,17 +423,28 @@ local mastery1 = {"Cookie Crafter"}
 local mastery2 = {"Reborn Skeleton"}
 local PosMsList = {["Pirate Millionaire"] = CFrame.new(-712.8272705078125, 98.5770492553711, 5711.9541015625),["Pistol Billionaire"] = CFrame.new(-723.4331665039062, 147.42906188964844, 5931.9931640625),["Dragon Crew Warrior"] = CFrame.new(7021.50439453125, 55.76270294189453, -730.1290893554688),["Dragon Crew Archer"] = CFrame.new(6625, 378, 244),["Female Islander"] = CFrame.new(4692.7939453125, 797.9766845703125, 858.8480224609375),["Venomous Assailant"] = CFrame.new(4902, 670, 39), ["Marine Commodore"] = CFrame.new(2401, 123, -7589),["Marine Rear Admiral"] = CFrame.new(3588, 229, -7085),["Fishman Raider"] = CFrame.new(-10941, 332, -8760),["Fishman Captain"] = CFrame.new(-11035, 332, -9087),["Forest Pirate"] = CFrame.new(-13446, 413, -7760),["Mythological Pirate"] = CFrame.new(-13510, 584, -6987),["Jungle Pirate"] = CFrame.new(-11778, 426, -10592),["Musketeer Pirate"] = CFrame.new(-13282, 496, -9565),["Reborn Skeleton"] = CFrame.new(-8764, 142, 5963),["Living Zombie"] = CFrame.new(-10227, 421, 6161),["Demonic Soul"] = CFrame.new(-9579, 6, 6194),["Posessed Mummy"] = CFrame.new(-9579, 6, 6194),["Peanut Scout"] = CFrame.new(-1993, 187, -10103),["Peanut President"] = CFrame.new(-2215, 159, -10474),["Ice Cream Chef"] = CFrame.new(-877, 118, -11032),["Ice Cream Commander"] = CFrame.new(-877, 118, -11032),["Cookie Crafter"] = CFrame.new(-2021, 38, -12028),["Cake Guard"] = CFrame.new(-2024, 38, -12026),["Baking Staff"] = CFrame.new(-1932, 38, -12848),["Head Baker"] = CFrame.new(-1932, 38, -12848),["Cocoa Warrior"] = CFrame.new(95, 73, -12309),["Chocolate Bar Battler"] = CFrame.new(647, 42, -12401),["Sweet Thief"] = CFrame.new(116, 36, -12478),["Candy Rebel"] = CFrame.new(47, 61, -12889),["Ghost"] = CFrame.new(5251, 5, 1111)}
 EquipWeapon = function(text)
-  if not text then return end
-  if plr.Backpack:FindFirstChild(text) then
-	plr.Character.Humanoid:EquipTool(plr.Backpack:FindFirstChild(text))
+  if not text or not plr then return false end
+  local backpack = plr:FindFirstChild("Backpack")
+  local character = plr.Character
+  local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+  if not backpack or not character or not humanoid then return false end
+  local tool = backpack:FindFirstChild(text)
+  if tool and tool:IsA("Tool") then
+    local ok, err = pcall(function() humanoid:EquipTool(tool) end)
+    if not ok then DebugWarn("EquipWeapon", err) end
+    return ok
   end
+  return false
 end
 weaponSc = function(weapon)
-  for __in, v in pairs(plr.Backpack:GetChildren()) do
-    if v:IsA("Tool") then
-      if v.ToolTip == weapon then EquipWeapon(v.Name) end
+  local backpack = plr and plr:FindFirstChild("Backpack")
+  if not backpack then return false end
+  for _, v in ipairs(backpack:GetChildren()) do
+    if v:IsA("Tool") and v.ToolTip == weapon then
+      return EquipWeapon(v.Name)
     end
   end
+  return false
 end
 -- ===== ETAPA 2: hooks opcionais =====
 -- Nunca substituímos warn/error nesta versão: isso esconderia o motivo dos bugs.
@@ -492,41 +526,98 @@ Attack.DistH = function(model, dist)
   if not targetRoot then return false end
   return (Root.Position - targetRoot.Position).Magnitude > dist
 end
-Attack.Kill = function(model,Succes)
-  if model and Succes then
-  if not model:GetAttribute("Locked") then model:SetAttribute("Locked",model.HumanoidRootPart.CFrame) end
-  PosMon = model:GetAttribute("Locked").Position
-  BringEnemy()
-  EquipWeapon(_G.SelectWeapon)
-  local Equipped = game.Players.LocalPlayer.Character:FindFirstChildOfClass("Tool")
-  local ToolTip = Equipped.ToolTip
-  if ToolTip == "Blox Fruit" then _tp(model.HumanoidRootPart.CFrame * CFrame.new(0,10,0) * CFrame.Angles(0,math.rad(90),0)) else _tp(model.HumanoidRootPart.CFrame * CFrame.new(0,30,0) * CFrame.Angles(0,math.rad(180),0))end
-  if RandomCFrame then wait(.5)_tp(model.HumanoidRootPart.CFrame * CFrame.new(0, 30, 25)) wait(.5)_tp(model.HumanoidRootPart.CFrame * CFrame.new(25, 30, 0)) wait(.5)_tp(model.HumanoidRootPart.CFrame * CFrame.new(-25, 30 ,0)) wait(.5)_tp(model.HumanoidRootPart.CFrame * CFrame.new(0, 30, 25)) wait(.5)_tp(model.HumanoidRootPart.CFrame * CFrame.new(-25, 30, 0))end
-  end
+local function GetAttackTargetParts(model)
+  if not model or not model.Parent then return nil, nil end
+  local hrp = model:FindFirstChild("HumanoidRootPart")
+  local hum = model:FindFirstChildOfClass("Humanoid")
+  if not hrp or not hum or hum.Health <= 0 then return nil, nil end
+  return hrp, hum
 end
-Attack.Kill2 = function(model,Succes)
-  if model and Succes then
-  if not model:GetAttribute("Locked") then model:SetAttribute("Locked",model.HumanoidRootPart.CFrame) end
-  PosMon = model:GetAttribute("Locked").Position
-  BringEnemy()
-  EquipWeapon(_G.SelectWeapon)
-  local Equipped = game.Players.LocalPlayer.Character:FindFirstChildOfClass("Tool")
-  local ToolTip = Equipped.ToolTip
-  if ToolTip == "Blox Fruit" then _tp(model.HumanoidRootPart.CFrame * CFrame.new(0,10,0) * CFrame.Angles(0,math.rad(90),0)) else _tp(model.HumanoidRootPart.CFrame * CFrame.new(0,30,8) * CFrame.Angles(0,math.rad(180),0))end
-  if RandomCFrame then wait(0.1)_tp(model.HumanoidRootPart.CFrame * CFrame.new(0, 30, 25)) wait(0.1)_tp(model.HumanoidRootPart.CFrame * CFrame.new(25, 30, 0)) wait(0.1)_tp(model.HumanoidRootPart.CFrame * CFrame.new(-25, 30 ,0)) wait(0.1)_tp(model.HumanoidRootPart.CFrame * CFrame.new(0, 30, 25)) wait(0.1)_tp(model.HumanoidRootPart.CFrame * CFrame.new(-25, 30, 0))end
-  end
+
+local function GetEquippedToolTip()
+  local character = plr and plr.Character
+  local tool = character and character:FindFirstChildOfClass("Tool")
+  if not tool then return nil end
+  return tool.ToolTip
 end
-Attack.KillSea = function(model,Succes)
-  if model and Succes then
-  if not model:GetAttribute("Locked") then model:SetAttribute("Locked",model.HumanoidRootPart.CFrame) end
-  PosMon = model:GetAttribute("Locked").Position
-  BringEnemy()
+
+Attack.Kill = function(model, Succes)
+  if not (model and Succes) then return false end
+  local targetRoot = GetAttackTargetParts(model)
+  if not targetRoot then return false end
+  if not model:GetAttribute("Locked") then model:SetAttribute("Locked", targetRoot.CFrame) end
+  local locked = model:GetAttribute("Locked")
+  if typeof(locked) ~= "CFrame" then return false end
+  PosMon = locked.Position
+  if typeof(BringEnemy) == "function" then pcall(BringEnemy) end
   EquipWeapon(_G.SelectWeapon)
-  local Equipped = game.Players.LocalPlayer.Character:FindFirstChildOfClass("Tool")
-  local ToolTip = Equipped.ToolTip
-  if ToolTip == "Blox Fruit" then _tp(model.HumanoidRootPart.CFrame * CFrame.new(0,10,0) * CFrame.Angles(0,math.rad(90),0)) else notween(model.HumanoidRootPart.CFrame * CFrame.new(0,50,8)) wait(.85)notween(model.HumanoidRootPart.CFrame * CFrame.new(0,400,0)) wait(1)end
+  local toolTip = GetEquippedToolTip()
+  if toolTip == "Blox Fruit" then
+    _tp(targetRoot.CFrame * CFrame.new(0,10,0) * CFrame.Angles(0,math.rad(90),0))
+  else
+    _tp(targetRoot.CFrame * CFrame.new(0,30,0) * CFrame.Angles(0,math.rad(180),0))
   end
+  if RandomCFrame then
+    for _, offset in ipairs({CFrame.new(0,30,25),CFrame.new(25,30,0),CFrame.new(-25,30,0),CFrame.new(0,30,25),CFrame.new(-25,30,0)}) do
+      task.wait(.5)
+      local currentRoot = model and model:FindFirstChild("HumanoidRootPart")
+      if not currentRoot then break end
+      _tp(currentRoot.CFrame * offset)
+    end
+  end
+  return true
 end
+
+Attack.Kill2 = function(model, Succes)
+  if not (model and Succes) then return false end
+  local targetRoot = GetAttackTargetParts(model)
+  if not targetRoot then return false end
+  if not model:GetAttribute("Locked") then model:SetAttribute("Locked", targetRoot.CFrame) end
+  local locked = model:GetAttribute("Locked")
+  if typeof(locked) ~= "CFrame" then return false end
+  PosMon = locked.Position
+  if typeof(BringEnemy) == "function" then pcall(BringEnemy) end
+  EquipWeapon(_G.SelectWeapon)
+  local toolTip = GetEquippedToolTip()
+  if toolTip == "Blox Fruit" then
+    _tp(targetRoot.CFrame * CFrame.new(0,10,0) * CFrame.Angles(0,math.rad(90),0))
+  else
+    _tp(targetRoot.CFrame * CFrame.new(0,30,8) * CFrame.Angles(0,math.rad(180),0))
+  end
+  if RandomCFrame then
+    for _, offset in ipairs({CFrame.new(0,30,25),CFrame.new(25,30,0),CFrame.new(-25,30,0),CFrame.new(0,30,25),CFrame.new(-25,30,0)}) do
+      task.wait(.1)
+      local currentRoot = model and model:FindFirstChild("HumanoidRootPart")
+      if not currentRoot then break end
+      _tp(currentRoot.CFrame * offset)
+    end
+  end
+  return true
+end
+
+Attack.KillSea = function(model, Succes)
+  if not (model and Succes) then return false end
+  local targetRoot = GetAttackTargetParts(model)
+  if not targetRoot then return false end
+  if not model:GetAttribute("Locked") then model:SetAttribute("Locked", targetRoot.CFrame) end
+  local locked = model:GetAttribute("Locked")
+  if typeof(locked) ~= "CFrame" then return false end
+  PosMon = locked.Position
+  if typeof(BringEnemy) == "function" then pcall(BringEnemy) end
+  EquipWeapon(_G.SelectWeapon)
+  local toolTip = GetEquippedToolTip()
+  if toolTip == "Blox Fruit" then
+    _tp(targetRoot.CFrame * CFrame.new(0,10,0) * CFrame.Angles(0,math.rad(90),0))
+  else
+    notween(targetRoot.CFrame * CFrame.new(0,50,8))
+    task.wait(.85)
+    local currentRoot = model and model:FindFirstChild("HumanoidRootPart")
+    if currentRoot then notween(currentRoot.CFrame * CFrame.new(0,400,0)) end
+    task.wait(1)
+  end
+  return true
+end
+
 Attack.Sword = function(model,Succes)
   if model and Succes then
   if not model:GetAttribute("Locked") then model:SetAttribute("Locked",model.HumanoidRootPart.CFrame) end
@@ -592,19 +683,29 @@ statsSetings = function(Num, value)
   end
 end
 BringEnemy = function()
-  if not _B then return end
-  for _,v in pairs(workspace.Enemies:GetChildren()) do
-    if v:FindFirstChild("Humanoid") and v.Humanoid.Health > 0 then
-	  if (v.PrimaryPart.Position - PosMon).Magnitude <= 300 then
-	    v.PrimaryPart.CFrame = CFrame.new(PosMon)
-		v.PrimaryPart.CanCollide = true;
-		v:FindFirstChild("Humanoid").WalkSpeed = 0;
-		v:FindFirstChild("Humanoid").JumpPower = 0;
-		if v.Humanoid:FindFirstChild("Animator") then v.Humanoid.Animator:Destroy()end;
-		plr.SimulationRadius = math.huge
-	  end
-	end                               
-  end                    	
+  if not _B or typeof(PosMon) ~= "Vector3" then return false end
+  local enemiesFolder = workspace:FindFirstChild("Enemies")
+  if not enemiesFolder then return false end
+  for _, v in ipairs(enemiesFolder:GetChildren()) do
+    local hum = v:FindFirstChildOfClass("Humanoid")
+    local primary = v.PrimaryPart or v:FindFirstChild("HumanoidRootPart")
+    if hum and primary and hum.Health > 0 and (primary.Position - PosMon).Magnitude <= 300 then
+      pcall(function()
+        primary.CFrame = CFrame.new(PosMon)
+        primary.CanCollide = true
+        hum.WalkSpeed = 0
+        hum.JumpPower = 0
+        local animator = hum:FindFirstChildOfClass("Animator")
+        if animator then animator:Destroy() end
+        if ExecutorCapabilities.sethiddenproperty then
+          SafeSetHiddenProperty(plr, "SimulationRadius", math.huge)
+        else
+          pcall(function() plr.SimulationRadius = math.huge end)
+        end
+      end)
+    end
+  end
+  return true
 end
 Useskills = function(weapon, skill)
   if weapon == "Melee" then
@@ -1163,6 +1264,11 @@ if not Fluent then
   DebugWarn("Fluent UI", "Não foi possível carregar a biblioteca. O script será encerrado antes de criar a interface.")
   return
 end
+if typeof(Fluent) ~= "table" or typeof(Fluent.CreateWindow) ~= "function" then
+  DebugWarn("Fluent UI", "A biblioteca carregou, mas não retornou uma API Fluent válida (CreateWindow ausente).")
+  return
+end
+DebugPrint("Fluent UI", "API validada; CreateWindow disponível.")
 
 local windowOk, windowOrError = pcall(function()
   return Fluent:CreateWindow({
@@ -1219,7 +1325,7 @@ ToggleButton.Size = UDim2.new(0, 50, 0, 50)
 ToggleButton.Position = UDim2.new(0.15, 0, 0.15, 0)
 ToggleButton.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
 ToggleButton.BorderSizePixel = 0
-ToggleButton.Image = "rbxassetid://91447350341060" -- sua imagem
+ToggleButton.Image = "rbxassetid://71492832762953" -- sua imagem
 ToggleButton.Parent = ScreenGui
 
 -- UICorner para bordas arredondadas
@@ -1922,7 +2028,7 @@ spawn(function()
                   local v = GetConnectionEnemies(mastery1)
                   if GetBP(SwordName) then                    
 		            if v then
-                      repeat wait() Attack.Sword(v,_G.FarmMastery_S) until _G.FarmMastery_S == false or not v.Parent or v.Humanoid.Healh <= 0		                  
+                      repeat wait() Attack.Sword(v,_G.FarmMastery_S) until _G.FarmMastery_S == false or not v.Parent or v.Humanoid.Health <= 0		                  
 		            else
 		              _tp(CFrame.new(-1943.676513671875, 251.5095672607422, -12337.880859375)) 
 		            end                    
@@ -1945,7 +2051,7 @@ spawn(function()
                   local v = GetConnectionEnemies(mastery2)
                   if GetBP(SwordName) then                    
 		            if v then
-                      repeat wait() Attack.Sword(v,_G.FarmMastery_S) until _G.FarmMastery_S == false or not v.Parent or v.Humanoid.Healh <= 0		                  
+                      repeat wait() Attack.Sword(v,_G.FarmMastery_S) until _G.FarmMastery_S == false or not v.Parent or v.Humanoid.Health <= 0		                  
 		            else
 		              _tp(CFrame.new(-9495.6806640625, 453.58624267578125, 5977.3486328125)) 
 		            end                    
@@ -2492,7 +2598,7 @@ spawn(function()
 	    end	  
 	  end  	    	    
 	    if plr.Backpack:FindFirstChild("Banana") and plr.Backpack:FindFirstChild("Apple") and plr.Backpack:FindFirstChild("Pineapple") or plr:FindFirstChild("Banana") and plr:FindFirstChild("Apple") and plr:FindFirstChild("Pineapple") then
-	      repeat wait() _tp(Kv2Pos1) until _G.AutoKenVTWO or plr.Character.HumanoidRootPart.CFrame == Kv2Pos1
+	      repeat wait() _tp(Kv2Pos1) until not _G.AutoKenVTWO or plr.Character.HumanoidRootPart.CFrame == Kv2Pos1
 		  replicated.Remotes.CommF_:InvokeServer("CitizenQuestProgress","Citizen")	    			 
 	    end
 	      if plr.Backpack:FindFirstChild("Fruit Bowl") or plr.Character:FindFirstChild("Fruit Bowl") then
@@ -3182,7 +3288,7 @@ spawn(function()
            if GetM("Vampire Fang") >= 20 and GetM("Demonic Wisp") >= 20 and GetM("Dark Fragment") <= 1 then
              if World2 then
                local n = GetConnectionEnemies("Darkbeard")
-		       if n then repeat task.wait() Attack.Kill(black,_G.snaguine) until _G.snaguine or black.Humanoid.Health <= 0 or not black.Parent
+		       if n then repeat task.wait() Attack.Kill(n,_G.snaguine) until not _G.snaguine or n.Humanoid.Health <= 0 or not n.Parent
 		      else _tp(CFrame.new(3798.4575195313, 13.826690673828, -3399.806640625))
 		      end
 		    else replicated.Remotes.CommF_:InvokeServer("TravelDressrosa")
@@ -4055,7 +4161,7 @@ spawn(function()
           _tp(CFrame.new(3677.08203125, 62.751937866211, -3144.8332519531))
         elseif GetConnectionEnemies("Darkbeard") then
           local v = GetConnectionEnemies("Darkbeard")          
-		  if v then repeat wait()Attack.Kill(v,_G.Auto_Def_DarkCoat)until _G.Auto_Def_DarkCoat == false or not v.Parent or v.Humanoid.Helath <= 0 end
+		  if v then repeat wait()Attack.Kill(v,_G.Auto_Def_DarkCoat)until _G.Auto_Def_DarkCoat == false or not v.Parent or v.Humanoid.Health <= 0 end
         elseif not GetBP("Fist of Darkness") and not GetConnectionEnemies("Darkbeard") then
           repeat wait(.1) _G.AutoFarmChest = true until not _G.Auto_Def_DarkCoat or GetBP("Fist of Darkness") or GetConnectionEnemies("Darkbeard") _G.AutoFarmChest = false
         end
@@ -4635,7 +4741,7 @@ spawn(function()
 		  elseif GetM("Dark Fragment") < 1 then
 		    if _G.AutoMatSoul and World2 then
 		      local black = GetConnectionEnemies("Darkbeard")
-		      if black then repeat task.wait()Attack.Kill(black, _G.AutoMatSoul)until _G.AutoMatSoul or black.Humanoid.Health <= 0
+		      if black then repeat task.wait()Attack.Kill(black, _G.AutoMatSoul)until not _G.AutoMatSoul or black.Humanoid.Health <= 0 or not black.Parent
 		      else _tp(CFrame.new(3798.4575195313, 13.826690673828, -3399.806640625))
 		      end
 		    else replicated.Remotes.CommF_:InvokeServer("TravelDressrosa")
@@ -7515,3 +7621,16 @@ task.spawn(function()
   end)
 end)
 Window:SelectTab(1)
+end, function(__err)
+    local __message = tostring(__err)
+    if debug and typeof(debug.traceback) == "function" then
+        local __okTrace, __trace = pcall(debug.traceback, __message, 2)
+        if __okTrace and __trace then __message = __trace end
+    end
+    warn("[SlayerHub/FATAL] " .. __message)
+    return __message
+end)
+
+if not __SLAYER_MAIN_OK then
+    warn("[SlayerHub/FATAL] A inicialização principal foi interrompida. Veja a mensagem acima.")
+end
