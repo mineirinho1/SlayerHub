@@ -52,6 +52,14 @@ local ExecutorCapabilities = {
     getsenv = typeof(getsenv) == "function",
     getconnections = typeof(getconnections) == "function",
     firetouchinterest = typeof(firetouchinterest) == "function",
+    fireclickdetector = typeof(fireclickdetector) == "function",
+    fireproximityprompt = typeof(fireproximityprompt) == "function",
+    setclipboard = typeof(setclipboard) == "function",
+    getupvalue = typeof(getupvalue) == "function" or (debug and typeof(debug.getupvalue) == "function"),
+    setupvalue = typeof(setupvalue) == "function" or (debug and typeof(debug.setupvalue) == "function"),
+    iscclosure = typeof(iscclosure) == "function",
+    debug_getinfo = debug and typeof(debug.getinfo) == "function" or false,
+    identifyexecutor = typeof(identifyexecutor) == "function",
     sethiddenproperty = typeof(sethiddenproperty) == "function",
     gethui = typeof(gethui) == "function",
     loadstring = typeof(loadstring) == "function",
@@ -62,6 +70,89 @@ for name, supported in pairs(ExecutorCapabilities) do
     if not supported then
         DebugPrint("Executor", name .. " = indisponível (recursos relacionados serão ignorados quando possível)")
     end
+end
+
+local function PrintCompatibilitySummary()
+    local total, available = 0, 0
+    for _, supported in pairs(ExecutorCapabilities) do
+        total += 1
+        if supported then available += 1 end
+    end
+    DebugPrint("Executor", string.format("Preflight: %d/%d APIs opcionais detectadas.", available, total))
+end
+PrintCompatibilitySummary()
+
+if ExecutorCapabilities.identifyexecutor then
+    local ok, executorName, executorVersion = pcall(identifyexecutor)
+    if ok then
+        DebugPrint("Executor", "Ambiente detectado:", tostring(executorName), tostring(executorVersion or "versão não informada"))
+    end
+end
+
+-- Aliases compatíveis com ambientes que expõem as funções de debug apenas em debug.*
+if typeof(getupvalue) ~= "function" and debug and typeof(debug.getupvalue) == "function" then
+    getupvalue = debug.getupvalue
+end
+if typeof(setupvalue) ~= "function" and debug and typeof(debug.setupvalue) == "function" then
+    setupvalue = debug.setupvalue
+end
+
+local function SafeFireClickDetector(clickDetector, distance)
+    if not ExecutorCapabilities.fireclickdetector then
+        WarnOnce("fireclickdetector", "fireclickdetector indisponível; cliques automáticos desse recurso foram ignorados.")
+        return false
+    end
+    if not clickDetector then
+        return false
+    end
+    local ok, err = pcall(function()
+        if distance ~= nil then
+            fireclickdetector(clickDetector, distance)
+        else
+            fireclickdetector(clickDetector)
+        end
+    end)
+    if not ok then
+        DebugWarn("fireclickdetector", err)
+    end
+    return ok
+end
+
+local function SafeFireProximityPrompt(prompt, holdDuration, skip)
+    if not ExecutorCapabilities.fireproximityprompt then
+        WarnOnce("fireproximityprompt", "fireproximityprompt indisponível; prompts automáticos desse recurso foram ignorados.")
+        return false
+    end
+    if not prompt then
+        return false
+    end
+    local ok, err = pcall(function()
+        if skip ~= nil then
+            fireproximityprompt(prompt, holdDuration, skip)
+        elseif holdDuration ~= nil then
+            fireproximityprompt(prompt, holdDuration)
+        else
+            fireproximityprompt(prompt)
+        end
+    end)
+    if not ok then
+        DebugWarn("fireproximityprompt", err)
+    end
+    return ok
+end
+
+local function SafeSetClipboard(value)
+    if not ExecutorCapabilities.setclipboard then
+        WarnOnce("setclipboard", "setclipboard indisponível; não foi possível copiar para a área de transferência.")
+        return false
+    end
+    local ok, err = pcall(function()
+        setclipboard(tostring(value))
+    end)
+    if not ok then
+        DebugWarn("setclipboard", err)
+    end
+    return ok
 end
 
 local function SafeFireTouchInterest(partA, partB, state)
@@ -227,7 +318,7 @@ NPCList = {}
 shouldTween = false
 SoulGuitar = false
 KenTest = true
-debug = false
+DojoDebugState = false
 Brazier1 = false
 Brazier2 = false
 Brazier3 = false
@@ -252,7 +343,22 @@ task.spawn(function()
 end)
 
 -- Auto-load externo também fica isolado.
+-- O arquivo Koby atual usa getupvalue/setupvalue/getgc/iscclosure/hookfunction/getsenv.
+-- Se alguma dessas APIs não existir, pulamos SOMENTE o auto-load para evitar erro de API.
 task.spawn(function()
+    local required = {"getupvalue", "setupvalue", "getgc", "iscclosure", "hookfunction", "getsenv", "debug_getinfo"}
+    local missing = {}
+    for _, apiName in ipairs(required) do
+        if not ExecutorCapabilities[apiName] then
+            table.insert(missing, apiName)
+        end
+    end
+
+    if #missing > 0 then
+        DebugWarn("AutoLoad/Koby", "Auto-load desativado neste executor. APIs ausentes: " .. table.concat(missing, ", "))
+        return
+    end
+
     SafeHttpLoad(
         "https://raw.githubusercontent.com/AnhDangNhoEm/TuanAnhIOS/refs/heads/main/koby",
         "AutoLoad/Koby"
@@ -365,7 +471,7 @@ Attack.Alive = function(model)
   return targetHumanoid ~= nil and targetHumanoid.Health > 0
 end
 
--- O original usava "mode.Position" (typo). Aqui usamos model/HumanoidRootPart com validação.
+-- Corrigido o typo original: agora usamos model/HumanoidRootPart com validação.
 Attack.Pos = function(model, dist)
   if not Root or not model then return false end
   local targetRoot = model:FindFirstChild("HumanoidRootPart")
@@ -1113,7 +1219,7 @@ ToggleButton.Size = UDim2.new(0, 50, 0, 50)
 ToggleButton.Position = UDim2.new(0.15, 0, 0.15, 0)
 ToggleButton.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
 ToggleButton.BorderSizePixel = 0
-ToggleButton.Image = "rbxassetid://71492832762953" -- sua imagem
+ToggleButton.Image = "rbxassetid://91447350341060" -- sua imagem
 ToggleButton.Parent = ScreenGui
 
 -- UICorner para bordas arredondadas
@@ -1641,7 +1747,7 @@ spawn(function()
               for AttributeName, BerryName in pairs(Bush:GetChildren()) do
                 if not BerryArray or table.find(BerryArray, BerryName) then
                   _tp(BerryName.WorldPivot)
-                  fireproximityprompt(BerryName.ProximityPrompt,math.huge)
+                  SafeFireProximityPrompt(BerryName.ProximityPrompt,math.huge)
                 end
               end
             end      
@@ -3194,7 +3300,7 @@ spawn(function()
             local zx = GetConnectionEnemies("Ghost")
             if zx then
               repeat wait() Attack.Kill(zx,_G.Auto_Yama) until zx.Humanoid.Health <= 0 or not zx.Parent or not _G.Auto_Yama               
-			  fireclickdetector(workspace.Map.Waterfall.SealedKatana.Handle.ClickDetector)
+			  SafeFireClickDetector(workspace.Map.Waterfall.SealedKatana.Handle.ClickDetector)
             end
           end
 	    end
@@ -3308,7 +3414,7 @@ spawn(function()
                     repeat task.wait() 
                       _tp(workspace.Map.HellDimension.Torch1.Particles.CFrame) 
                       for i, v in pairs(workspace.Map.HellDimension:GetDescendants()) do
-                        if v:IsA("ProximityPrompt") then fireproximityprompt(v) end
+                        if v:IsA("ProximityPrompt") then SafeFireProximityPrompt(v) end
                       end
                     until (workspace.Map.HellDimension.Torch1.Particles.Position - Root.Position).Magnitude < 5
                     wait(2) _G.T1Yama = true
@@ -3317,7 +3423,7 @@ spawn(function()
                     repeat task.wait()
                       _tp(workspace.Map.HellDimension.Torch2.Particles.CFrame) 
                       for i, v in pairs(workspace.Map.HellDimension:GetDescendants()) do
-                        if v:IsA("ProximityPrompt") then fireproximityprompt(v)end
+                        if v:IsA("ProximityPrompt") then SafeFireProximityPrompt(v)end
                       end
                     until (workspace.Map.HellDimension.Torch2.Particles.Position - Root.Position).Magnitude < 5
                     wait(2) _G.T2Yama = true
@@ -3326,7 +3432,7 @@ spawn(function()
                       repeat task.wait() 
                         _tp(workspace.Map.HellDimension.Torch3.Particles.CFrame) 
                         for i, v in pairs(workspace.Map.HellDimension:GetDescendants()) do
-                          if v:IsA("ProximityPrompt") then fireproximityprompt(v)end
+                          if v:IsA("ProximityPrompt") then SafeFireProximityPrompt(v)end
                         end
                       until (workspace.Map.HellDimension.Torch3.Particles.Position - Root.Position).Magnitude < 5 
                       wait(2) _G.T3Yama = true
@@ -3458,7 +3564,7 @@ spawn(function()
                      repeat wait() 
                        _tp(CFrame.new(-22529.6171875, 5275.77392578125, 3873.5712890625)) 
                        for i, v in pairs(workspace.Map.HeavenlyDimension:GetDescendants()) do
-                         if v:IsA("ProximityPrompt") then fireproximityprompt(v) end
+                         if v:IsA("ProximityPrompt") then SafeFireProximityPrompt(v) end
                        end
                      until (CFrame.new(-22529.6171875, 5275.77392578125, 3873.5712890625).Position - game.Players.LocalPlayer.Character.HumanoidRootPart.Position).Magnitude < 5
                      wait(2)
@@ -3468,7 +3574,7 @@ spawn(function()
                     repeat wait()
                       _tp(CFrame.new(-22637.291015625, 5281.365234375, 3749.28857421875)) 
                        for i, v in pairs(workspace.Map.HeavenlyDimension:GetDescendants()) do
-                         if v:IsA("ProximityPrompt") then fireproximityprompt(v) end
+                         if v:IsA("ProximityPrompt") then SafeFireProximityPrompt(v) end
                        end
                     until (CFrame.new(-22637.291015625, 5281.365234375, 3749.28857421875).Position - game.Players.LocalPlayer.Character.HumanoidRootPart.Position).Magnitude < 5
                     wait(2) _G.DoneT2 = true
@@ -3477,7 +3583,7 @@ spawn(function()
                     repeat task.wait() 
                       _tp(CFrame.new(-22791.14453125, 5277.16552734375, 3764.570068359375)) 
                       for i, v in pairs(workspace.Map.HeavenlyDimension:GetDescendants()) do
-                        if v:IsA("ProximityPrompt") then fireproximityprompt(v) end
+                        if v:IsA("ProximityPrompt") then SafeFireProximityPrompt(v) end
                       end
                     until (CFrame.new(-22791.14453125, 5277.16552734375, 3764.570068359375).Position - game.Players.LocalPlayer.Character.HumanoidRootPart.Position).Magnitude < 5
                     wait(2) _G.DoneT3 = true
@@ -3601,7 +3707,7 @@ Callback = function()
 end})
 Tabs.Quests:AddButton({Title = "Start Law Raids", Description = "",
 Callback = function()
-  fireclickdetector(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector)
+  SafeFireClickDetector(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector)
 end})
 
 Tabs.Quests:AddSection("East Blue Misc")
@@ -3906,7 +4012,7 @@ spawn(function()
             _tp(CFrame.new(3677.08203125, 62.751937866211, -3144.8332519531))
           elseif GetConnectionEnemies("Darkbeard") and GetBP("Fist of Darkness") >= 1 then
             repeat wait() _tp(CFrame.new(-5719.36376953125, 48.50590515136719, -782.9759521484375)) until not _G.DarkBladev3 or (Root.Position == CFrame.new(-5719.36376953125, 48.50590515136719, -782.9759521484375).Position)
-            fireclickdetector(workspace.Map.GraveIsland.Mountain.Rocks.Button.ClickDetector)
+            SafeFireClickDetector(workspace.Map.GraveIsland.Mountain.Rocks.Button.ClickDetector)
           end         
         else
           _G.AutoFarmChest = true;
@@ -4393,7 +4499,7 @@ function getRT(num)
 end
 GetFirePlacard = function(Number,Side)
   if tostring(workspace.Map["Haunted Castle"]["Placard"..Number][Side].Indicator.BrickColor) ~= "Pearl" then
-    fireclickdetector(workspace.Map["Haunted Castle"]["Placard"..Number][Side].ClickDetector)
+    SafeFireClickDetector(workspace.Map["Haunted Castle"]["Placard"..Number][Side].ClickDetector)
   end
 end
 spawn(function()
@@ -4442,43 +4548,43 @@ spawn(function()
                local z1 = getRT(1)
                local _z1 = getT(1)
                if z1 and _z1 then
-                 fireclickdetector(workspace.Map["Haunted Castle"].Tablet.Segment1:FindFirstChild("ClickDetector"))
+                 SafeFireClickDetector(workspace.Map["Haunted Castle"].Tablet.Segment1:FindFirstChild("ClickDetector"))
                end
              until z1 == _z1
             repeat wait()
               local z2 = getRT(2)
               local _z2 = getT(3)
               if z2 and _z2 then
-                fireclickdetector(workspace.Map["Haunted Castle"].Tablet.Segment3:FindFirstChild("ClickDetector"))
+                SafeFireClickDetector(workspace.Map["Haunted Castle"].Tablet.Segment3:FindFirstChild("ClickDetector"))
               end
             until z2 == _z2
           repeat wait()
             local z3 = getRT(3)
             local _z3 = getT(4)
             if z3 and _z3 then
-              fireclickdetector(workspace.Map["Haunted Castle"].Tablet.Segment4:FindFirstChild("ClickDetector"))
+              SafeFireClickDetector(workspace.Map["Haunted Castle"].Tablet.Segment4:FindFirstChild("ClickDetector"))
             end
           until z3 == _z3
           repeat wait()
             local z4 = getRT(4)
             local _z4 = getT(7)
             if z4 and _z4 then
-              fireclickdetector(workspace.Map["Haunted Castle"].Tablet.Segment7:FindFirstChild("ClickDetector"))
+              SafeFireClickDetector(workspace.Map["Haunted Castle"].Tablet.Segment7:FindFirstChild("ClickDetector"))
             end
           until z4 == _z4
         repeat wait()
           local z5 = getRT(5)
           local _z5 = getT(10)
           if z5 and _z5 then
-            fireclickdetector(workspace.Map["Haunted Castle"].Tablet.Segment10:FindFirstChild("ClickDetector"))    
+            SafeFireClickDetector(workspace.Map["Haunted Castle"].Tablet.Segment10:FindFirstChild("ClickDetector"))    
           end
         until z5 == _z5
         repeat wait()    
-          fireclickdetector(workspace.Map["Haunted Castle"].Tablet.Segment2:FindFirstChild("ClickDetector"))
-          fireclickdetector(workspace.Map["Haunted Castle"].Tablet.Segment5:FindFirstChild("ClickDetector"))
-          fireclickdetector(workspace.Map["Haunted Castle"].Tablet.Segment6:FindFirstChild("ClickDetector"))
-          fireclickdetector(workspace.Map["Haunted Castle"].Tablet.Segment8:FindFirstChild("ClickDetector"))
-          fireclickdetector(workspace.Map["Haunted Castle"].Tablet.Segment9:FindFirstChild("ClickDetector"))       
+          SafeFireClickDetector(workspace.Map["Haunted Castle"].Tablet.Segment2:FindFirstChild("ClickDetector"))
+          SafeFireClickDetector(workspace.Map["Haunted Castle"].Tablet.Segment5:FindFirstChild("ClickDetector"))
+          SafeFireClickDetector(workspace.Map["Haunted Castle"].Tablet.Segment6:FindFirstChild("ClickDetector"))
+          SafeFireClickDetector(workspace.Map["Haunted Castle"].Tablet.Segment8:FindFirstChild("ClickDetector"))
+          SafeFireClickDetector(workspace.Map["Haunted Castle"].Tablet.Segment9:FindFirstChild("ClickDetector"))       
         until workspace.Map["Haunted Castle"].Tablet.Segment2.Line.Rotation.Z == 0 or workspace.Map["Haunted Castle"].Tablet.Segment5.Line.Rotation.Z == 0 or workspace.Map["Haunted Castle"].Tablet.Segment6.Line.Rotation.Z == 0 or workspace.Map["Haunted Castle"].Tablet.Segment8.Line.Rotation.Z == 0 or workspace.Map["Haunted Castle"].Tablet.Segment9.Line.Rotation.Z == 0
           elseif replicated.Remotes.CommF_:InvokeServer("GuitarPuzzleProgress","Check").Pipes == false then
             Quest1 = false;
@@ -4486,20 +4592,20 @@ spawn(function()
             Quest3 = false;
             Quest4 = true;
            _tp(workspace.Map["Haunted Castle"]["Lab Puzzle"].ColorFloor.Model.Part3.CFrame)
-		   fireclickdetector(workspace.Map["Haunted Castle"]["Lab Puzzle"].ColorFloor.Model.Part3.ClickDetector)
+		   SafeFireClickDetector(workspace.Map["Haunted Castle"]["Lab Puzzle"].ColorFloor.Model.Part3.ClickDetector)
 		   _tp(workspace.Map["Haunted Castle"]["Lab Puzzle"].ColorFloor.Model.Part4.CFrame)
-		   fireclickdetector(workspace.Map["Haunted Castle"]["Lab Puzzle"].ColorFloor.Model.Part4.ClickDetector)
-		   fireclickdetector(workspace.Map["Haunted Castle"]["Lab Puzzle"].ColorFloor.Model.Part4.ClickDetector)
-		   fireclickdetector(workspace.Map["Haunted Castle"]["Lab Puzzle"].ColorFloor.Model.Part4.ClickDetector)
+		   SafeFireClickDetector(workspace.Map["Haunted Castle"]["Lab Puzzle"].ColorFloor.Model.Part4.ClickDetector)
+		   SafeFireClickDetector(workspace.Map["Haunted Castle"]["Lab Puzzle"].ColorFloor.Model.Part4.ClickDetector)
+		   SafeFireClickDetector(workspace.Map["Haunted Castle"]["Lab Puzzle"].ColorFloor.Model.Part4.ClickDetector)
 		   _tp(workspace.Map["Haunted Castle"]["Lab Puzzle"].ColorFloor.Model.Part6.CFrame)
-		   fireclickdetector(workspace.Map["Haunted Castle"]["Lab Puzzle"].ColorFloor.Model.Part6.ClickDetector)
-		   fireclickdetector(workspace.Map["Haunted Castle"]["Lab Puzzle"].ColorFloor.Model.Part6.ClickDetector)
+		   SafeFireClickDetector(workspace.Map["Haunted Castle"]["Lab Puzzle"].ColorFloor.Model.Part6.ClickDetector)
+		   SafeFireClickDetector(workspace.Map["Haunted Castle"]["Lab Puzzle"].ColorFloor.Model.Part6.ClickDetector)
 		   _tp(workspace.Map["Haunted Castle"]["Lab Puzzle"].ColorFloor.Model.Part8.CFrame)
-		   fireclickdetector(workspace.Map["Haunted Castle"]["Lab Puzzle"].ColorFloor.Model.Part8.ClickDetector)
+		   SafeFireClickDetector(workspace.Map["Haunted Castle"]["Lab Puzzle"].ColorFloor.Model.Part8.ClickDetector)
 	   	   _tp(workspace.Map["Haunted Castle"]["Lab Puzzle"].ColorFloor.Model.Part10.CFrame)
-		   fireclickdetector(workspace.Map["Haunted Castle"]["Lab Puzzle"].ColorFloor.Model.Part10.ClickDetector)
-	       fireclickdetector(workspace.Map["Haunted Castle"]["Lab Puzzle"].ColorFloor.Model.Part10.ClickDetector)
-	       fireclickdetector(workspace.Map["Haunted Castle"]["Lab Puzzle"].ColorFloor.Model.Part10.ClickDetector)
+		   SafeFireClickDetector(workspace.Map["Haunted Castle"]["Lab Puzzle"].ColorFloor.Model.Part10.ClickDetector)
+	       SafeFireClickDetector(workspace.Map["Haunted Castle"]["Lab Puzzle"].ColorFloor.Model.Part10.ClickDetector)
+	       SafeFireClickDetector(workspace.Map["Haunted Castle"]["Lab Puzzle"].ColorFloor.Model.Part10.ClickDetector)
           end
         end
       end
@@ -4594,7 +4700,7 @@ spawn(function()
     if _G.Lver then
       pcall(function()
         for x,c in pairs(workspace.Map["Temple of Time"]:GetDescendants()) do
-        if c.Name == "ProximityPrompt" then fireproximityprompt(c,math.huge)end
+        if c.Name == "ProximityPrompt" then SafeFireProximityPrompt(c,math.huge)end
         end
       end)
     end
@@ -4785,10 +4891,10 @@ spawn(function()
         local args = {[1] = {["NPC"] = "Dojo Trainer",["Command"] = "RequestQuest"}}        
         local progress = replicated.Modules.Net:FindFirstChild("RF/InteractDragonQuest"):InvokeServer(unpack(args))
         local NameBelt = printBeltName(progress)
-        if debug == false and not progress and not NameBelt then
+        if DojoDebugState == false and not progress and not NameBelt then
           _tp(CFrame.new(5865.0234375, 1208.3154296875, 871.15185546875))
-          debug = true
-        elseif debug == true and (CFrame.new(5865.0234375, 1208.3154296875, 871.15185546875).Position - plr.Character.HumanoidRootPart.Position).Magnitude <= 50 then
+          DojoDebugState = true
+        elseif DojoDebugState == true and (CFrame.new(5865.0234375, 1208.3154296875, 871.15185546875).Position - plr.Character.HumanoidRootPart.Position).Magnitude <= 50 then
           if NameBelt == "White" then
             local v = GetConnectionEnemies("Skull Slayer")
             if v then repeat task.wait() Attack.Kill(v, _G.Dojoo) until not progress or not _G.Dojoo or not Attack.Alive(v)
@@ -4851,7 +4957,7 @@ spawn(function()
           end
         end
         if not progress then
-          debug = false
+          DojoDebugState = false
           local args = {[1] = {["NPC"] = "Dojo Trainer",["Command"] = "ClaimQuest"}}
           replicated.Modules.Net:FindFirstChild("RF/InteractDragonQuest"):InvokeServer(unpack(args))
         end
@@ -5195,7 +5301,7 @@ spawn(function()
           if workspace.Map:FindFirstChild("PrehistoricIsland", true) or workspace["_WorldOrigin"].Locations:FindFirstChild("Prehistoric Island", true) then            
             if workspace.Map.PrehistoricIsland.Core.ActivationPrompt:FindFirstChild("ProximityPrompt", true) then
               if plr:DistanceFromCharacter(workspace.Map.PrehistoricIsland.Core.ActivationPrompt.CFrame.Position) <= 150 then
-                fireproximityprompt(workspace.Map.PrehistoricIsland.Core.ActivationPrompt.ProximityPrompt, math.huge)
+                SafeFireProximityPrompt(workspace.Map.PrehistoricIsland.Core.ActivationPrompt.ProximityPrompt, math.huge)
                 vim1:SendKeyEvent(true, "E", false, game) wait(1.5) vim1:SendKeyEvent(false, "E", false, game)
               end
               _tp(workspace.Map.PrehistoricIsland.Core.ActivationPrompt.CFrame)              
@@ -5291,7 +5397,7 @@ spawn(function()
   while wait(Sec) do
     pcall(function()
       if _G.Prehis_DE then
-      if workspace.Map.PrehistoricIsland.Core.SpawnedDragonEggs:FindFirstChild("DragonEgg") then _tp(workspace.Map.PrehistoricIsland.Core.SpawnedDragonEggs:FindFirstChild("DragonEgg").Molten.CFrame) fireproximityprompt(workspace.Map.PrehistoricIsland.Core.SpawnedDragonEggs.DragonEgg.Molten.ProximityPrompt, 30) end        
+      if workspace.Map.PrehistoricIsland.Core.SpawnedDragonEggs:FindFirstChild("DragonEgg") then _tp(workspace.Map.PrehistoricIsland.Core.SpawnedDragonEggs:FindFirstChild("DragonEgg").Molten.CFrame) SafeFireProximityPrompt(workspace.Map.PrehistoricIsland.Core.SpawnedDragonEggs.DragonEgg.Molten.ProximityPrompt, 30) end        
       end
     end)
   end
@@ -5705,10 +5811,10 @@ spawn(function()
           if GetBP("Special Microchip") then
             if World2 then
               _tp(CFrame.new(-6438.73535, 250.645355, -4501.50684))
-              fireclickdetector(workspace.Map.CircleIsland.RaidSummon2.Button.Main.ClickDetector)
+              SafeFireClickDetector(workspace.Map.CircleIsland.RaidSummon2.Button.Main.ClickDetector)
             elseif World3 then                   
               replicated.Remotes.CommF_:InvokeServer("requestEntrance",Vector3.new(-5097.93164, 316.447021, -3142.66602, -0.405007899, -4.31682743e-08, 0.914313197, -1.90943332e-08, 1, 3.8755779e-08, -0.914313197, -1.76180437e-09, -0.405007899))
-              fireclickdetector(workspace.Map["Boat Castle"].RaidSummon2.Button.Main.ClickDetector)
+              SafeFireClickDetector(workspace.Map["Boat Castle"].RaidSummon2.Button.Main.ClickDetector)
             end
           end
         end
@@ -7042,7 +7148,7 @@ Tabs.Misc:AddButton({Title = "Teleport [Job ID]", Description = "",Callback = fu
   replicated['__ServerBrowser']:InvokeServer("teleport",_G.JobId)
 end})
 Tabs.Misc:AddButton({Title = "Copy JobID", Description = "",Callback = function()
-  setclipboard(tostring(game.JobId))
+  SafeSetClipboard(game.JobId)
 end})
 
 Tabs.Misc:AddSection("Player Gui / Others")
