@@ -1,10 +1,4 @@
 task.spawn(function()
-    repeat task.wait() until game:IsLoaded() and game.Players.LocalPlayer
-    task.wait(1)
-    local remote = game:GetService("ReplicatedStorage"):WaitForChild("Remotes"):WaitForChild("CommF_")
-    remote:InvokeServer("SetTeam", "Pirates")
-end)
-task.spawn(function()
     local HttpService = game:GetService("HttpService")
     local Players = game:GetService("Players")
     local LP = Players.LocalPlayer
@@ -20,6 +14,7 @@ task.spawn(function()
         warn("Falha ao executar auto-load:", err)
     end
 end)
+
 do
   ply = game.Players
   plr = ply.LocalPlayer
@@ -51,11 +46,12 @@ do
   ClickState = 0
   Num_self = 25
 end
+
 repeat local start = plr.PlayerGui:WaitForChild("Main"):WaitForChild("Loading") and game:IsLoaded() wait() until start
 World1 = game.PlaceId == 2753915549 or game.PlaceId == 85211729168715
 World2 = game.PlaceId == 4442272183 or game.PlaceId == 79091703265657
 World3 = game.PlaceId == 7449423635 or game.PlaceId == 100117331123089
-Sea = World1 or World2 or World3 or plr:Kick("❌ Error : A[12]Blox Fruits ❌ Incorrect place ID, please wait for an update. ")
+Sea = World1 or World2 or World3 or plr:Kick("❌ Error : A[12]Blox Fruits ❌")
 Marines = function() replicated.Remotes.CommF_:InvokeServer("SetTeam","Marines") end
 Pirates = function() replicated.Remotes.CommF_:InvokeServer("SetTeam","Pirates") end
 if World1 then Boss = {"The Gorilla King","Bobby","The Saw","Yeti","Mob Leader","Vice Admiral","Saber Expert","Warden","Chief Warden","Swan","Magma Admiral","Fishman Lord","Wysper","Thunder God","Cyborg","Ice Admiral","Greybeard"}
@@ -695,95 +691,87 @@ QuestNeta = function()
 end
 
 local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
-local Window = Fluent:CreateWindow({Title = "❤️Eclipse Hub❤️",SubTitle = "| By:Luan Valentines Day Edition",TabWidth = 180,Size = UDim2.fromOffset(660, 440),Acrylic = false,Theme = "Rose",MinimizeKey = Enum.KeyCode.End})
-	
--- Services
+local Window = Fluent:CreateWindow({Title = "Haidepzai Hub [Version:V2]",SubTitle = "| By ⚡Real.Haidz⚡",TabWidth = 155,Size = UDim2.fromOffset(555, 320),Acrylic = false,Theme = "Dark",MinimizeKey = Enum.KeyCode.End})
+
 local CoreGui = game:GetService("CoreGui")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 local UserInputService = game:GetService("UserInputService")
 
--- ScreenGui
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "ControlButtonGUI"
 ScreenGui.Parent = CoreGui
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
--- ImageButton
 local ToggleButton = Instance.new("ImageButton")
-ToggleButton.Size = UDim2.new(0, 50, 0, 50)
+ToggleButton.Size = UDim2.new(0, 55, 0, 55)
 ToggleButton.Position = UDim2.new(0.15, 0, 0.15, 0)
-ToggleButton.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+ToggleButton.BackgroundColor3 = Color3.fromRGB(30,30,30) -- nền cho tròn rõ
+ToggleButton.BackgroundTransparency = 0
 ToggleButton.BorderSizePixel = 0
-ToggleButton.Image = "rbxassetid://130364232574601" -- sua imagem
+ToggleButton.Image = "rbxassetid://138869397973700"
+ToggleButton.ScaleType = Enum.ScaleType.Crop -- FIX TRÒN CHUẨN
 ToggleButton.Parent = ScreenGui
 
--- UICorner para bordas arredondadas
+-- bo tròn chuẩn 45x45
 local Corner = Instance.new("UICorner")
-Corner.CornerRadius = UDim.new(1, 0)
+Corner.CornerRadius = UDim.new(1, 0) -- full tròn
 Corner.Parent = ToggleButton
 
--- Clique envia tecla End
+-- CLICK
 ToggleButton.MouseButton1Click:Connect(function()
-    VirtualInputManager:SendKeyEvent(true, "End", false, game)
-    VirtualInputManager:SendKeyEvent(false, "End", false, game)
+    VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.End, false, game)
+    VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.End, false, game)
 end)
 
--- Arrasto funcional
+-- DRAG FIX MƯỢT
 local dragging = false
-local dragInput, dragStart, startPos
-
-local function update(input)
-    local delta = input.Position - dragStart
-    ToggleButton.Position = UDim2.new(
-        startPos.X.Scale,
-        startPos.X.Offset + delta.X,
-        startPos.Y.Scale,
-        startPos.Y.Offset + delta.Y
-    )
-end
+local dragStart, startPos
 
 ToggleButton.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+    if input.UserInputType == Enum.UserInputType.MouseButton1 
+    or input.UserInputType == Enum.UserInputType.Touch then
         dragging = true
         dragStart = input.Position
         startPos = ToggleButton.Position
-
-        input.Changed:Connect(function()
-            if input.UserInputState == Enum.UserInputState.End then
-                dragging = false
-            end
-        end)
-    end
-end)
-
-ToggleButton.InputChanged:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-        dragInput = input
     end
 end)
 
 UserInputService.InputChanged:Connect(function(input)
-    if dragging and input == dragInput then
-        update(input)
+    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement 
+    or input.UserInputType == Enum.UserInputType.Touch) then
+
+        local delta = input.Position - dragStart
+
+        ToggleButton.Position = UDim2.new(
+            startPos.X.Scale,
+            startPos.X.Offset + delta.X,
+            startPos.Y.Scale,
+            startPos.Y.Offset + delta.Y
+        )
     end
 end)
 
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 
+    or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = false
+    end
+end)
 local Tabs = {
-  Settings = Window:AddTab({Title = "⚙️Setting Farm", Icon = ""}),
-  Main = Window:AddTab({Title = "🚀Farm", Icon = ""}),
-  Melee = Window:AddTab({Title = "🥊Fighting Style", Icon = ""}),
-  Quests = Window:AddTab({Title = "💎Items Farm", Icon = ""}),
-  Valentine = Window:AddTab({Title = "❤️Valentine", Icon = ""}),
-  SeaEvent = Window:AddTab({Title = "🌊Sea Events", Icon = ""}),
-  Mirage = Window:AddTab({Title = "🌴Mirage + RaceV4", Icon = ""}),
-  Drago = Window:AddTab({Title = "🐉Drago Dojo", Icon = ""}),
-  Prehistoric = Window:AddTab({Title = "🦕Prehistoric", Icon = ""}),
-  Raids = Window:AddTab({Title = "🌀Raid", Icon = ""}),
-  Combat = Window:AddTab({Title = "⚔️Combat PVP", Icon = ""}),
-  Travel = Window:AddTab({Title = "🗺️Travel", Icon = ""}),
-  Fruit = Window:AddTab({Title = "🍎Fruits", Icon = ""}),
-  Shop = Window:AddTab({Title = "🛒Shop", Icon = ""}),
-  Misc = Window:AddTab({Title = "⚡Misc", Icon = ""})
+  Shop = Window:AddTab({Title = "Cửa Hàng", Icon = "shopping-cart"}),
+  Combat = Window:AddTab({Title = "Thuộc Người Chơi", Icon = "user"}),
+  Settings = Window:AddTab({Title = "Cài Đặt", Icon = "rbxassetid://7734053495"}),
+  Main = Window:AddTab({Title = "Cày", Icon = "home"}),
+  Melee = Window:AddTab({Title = "Võ Thuật", Icon = "rbxassetid://11162889532"}),
+  Quests = Window:AddTab({Title = "Vật Phẩm Cày", Icon = "rbxassetid://13075622619"}),
+  SeaEvent = Window:AddTab({Title = "Biển", Icon = "rbxassetid://10709783577"}),
+  Mirage = Window:AddTab({Title = "Đảo Bí Ẩn/V4", Icon = "rbxassetid://11162889532"}),
+  Drago = Window:AddTab({Title = "Võ Đường Drago", Icon = "layers"}),
+  Prehistoric = Window:AddTab({Title = "Núi Lửa", Icon = "flame"}),
+  Raids = Window:AddTab({Title = "Đột Kích", Icon = "skull"}),
+  Travel = Window:AddTab({Title = "Dịch Chuyển", Icon = "map-pin"}),
+  Fruit = Window:AddTab({Title = "Trái", Icon = "cherry"}),
+  Misc = Window:AddTab({Title = "Linh Tinh", Icon = "rbxassetid://6031280882"})
 }
  
 local FarmLevel = Tabs.Main:AddToggle("FarmLevel", {Title = "Auto Farm Level", Description = "", Default = false})
@@ -3147,7 +3135,7 @@ spawn(function()
     end
   end
 end)
-local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Pole V2 [Patched]", Description = "", Default = false})
+local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Pole V2 [Beta]", Description = "", Default = false})
 Q:OnChanged(function(Value)
   _G.AutoPoleV2 = Value
 end)
@@ -3702,40 +3690,6 @@ spawn(function()
       end)
     end
   end
-end)
-local AutoValentineGacha = Tabs.Valentine:AddToggle("AutoValentineGacha", {Title = "Auto Valentine Gacha", Description = "", Default = false})
-AutoValentineGacha:OnChanged(function(Value)
-    _G.AutoValentineGacha = Value
-end)
-
-spawn(function()
-    local ReplicatedStorage = game:GetService("ReplicatedStorage")
-    local Remotes = ReplicatedStorage:WaitForChild("Remotes")
-    local CommF = Remotes:WaitForChild("CommF_")
-
-    local function fireActivity()
-        local reportRemote = ReplicatedStorage:FindFirstChild("ReportActivity", true)
-        if reportRemote and reportRemote:IsA("RemoteEvent") then
-            pcall(function()
-                reportRemote:FireServer("GachaWindow")
-            end)
-        end
-    end
-
-    while wait(0.2) do
-        if _G.AutoValentineGacha then
-            pcall(function()
-                CommF:InvokeServer("Cousin")
-                wait(0.1)
-                fireActivity()
-                wait(0.1)
-                CommF:InvokeServer("Cousin", "CheckCanBuyType", "ValentinesGacha26")
-                wait(0.1)
-                CommF:InvokeServer("Cousin", "ValentinesGacha26")
-                wait(2.5)
-            end)
-        end
-    end
 end)
 
 Tabs.Mirage:AddSection("Mystic Island / Full Moon")
@@ -4621,7 +4575,7 @@ spawn(function()
     end)
   end
 end)
-Toggle = Tabs.Drago:AddToggle("Toggle", {Title = "Auto Relic Drago Trial", Description = "turn on for auto trial v4 you have to COLLECT RELIC by your self", Default = false})
+Toggle = Tabs.Drago:AddToggle("Toggle", {Title = "Auto Relic Drago Trial [Beta]", Description = "turn on for auto trial v4 you have to COLLECT RELIC by your self", Default = false})
 Toggle:OnChanged(function(Value)
   _G.Relic123 = Value
 end)
