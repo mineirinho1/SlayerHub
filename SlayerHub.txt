@@ -1,5 +1,5 @@
 --[[
-    SlayerHub - Xeno PC STABLE / tolerante a falhas
+    SlayerHub - Xeno PC STABLE V2 / UI embutida + async guard
 
     Objetivos das alterações:
     1. Mostrar no console onde a inicialização falha.
@@ -35,6 +35,52 @@ end
 
 local function DebugWarn(section, ...)
     warn(__SLAYER_PREFIX, "[" .. tostring(section) .. "]", ...)
+end
+
+
+-- Todas as threads criadas pelo hub passam por estes wrappers.
+-- Assim um erro assíncrono não aparece apenas como `CoreGui.<id>:1`; o console
+-- também mostra o rótulo L<linha-original> da thread que falhou.
+local __RAW_TASK_SPAWN = task.spawn
+local __RAW_TASK_DEFER = task.defer
+
+local function __FormatTrace(err)
+    local message = tostring(err)
+    if debug and typeof(debug.traceback) == "function" then
+        local ok, trace = pcall(debug.traceback, message, 2)
+        if ok and trace then
+            return trace
+        end
+    end
+    return message
+end
+
+local function SafeTaskSpawn(label, callback)
+    if typeof(callback) ~= "function" then
+        DebugWarn("Async/" .. tostring(label), "callback não é função:", typeof(callback))
+        return nil
+    end
+
+    return __RAW_TASK_SPAWN(function()
+        local ok, err = xpcall(callback, __FormatTrace)
+        if not ok then
+            DebugWarn("Async/" .. tostring(label), err)
+        end
+    end)
+end
+
+local function SafeTaskDefer(label, callback)
+    if typeof(callback) ~= "function" then
+        DebugWarn("Defer/" .. tostring(label), "callback não é função:", typeof(callback))
+        return nil
+    end
+
+    return __RAW_TASK_DEFER(function()
+        local ok, err = xpcall(callback, __FormatTrace)
+        if not ok then
+            DebugWarn("Defer/" .. tostring(label), err)
+        end
+    end)
 end
 
 local function WarnOnce(key, message)
@@ -290,7 +336,7 @@ if not SetupCharacter(firstCharacter) then
 end
 
 plr.CharacterAdded:Connect(function(character)
-    task.defer(function()
+    SafeTaskDefer("L293", function()
         local ok, err = pcall(SetupCharacter, character)
         if not ok then
             DebugWarn("Respawn", err)
@@ -299,6 +345,44 @@ plr.CharacterAdded:Connect(function(character)
 end)
 
 replicated = game:GetService("ReplicatedStorage")
+
+
+-- O cliente atual do jogo pode inicializar PrehistoricIslandClient sem que o
+-- RemoteEvent de coleta de ovos esteja replicado naquele momento/servidor.
+-- Não tentamos modificar Modules.Net nem criar um RemoteEvent falso. Em vez disso,
+-- o recurso de ovos do hub fica desligado até o RemoteEvent real existir.
+local function FindCollectedDragonEggRemote()
+    local ok, descendants = pcall(function()
+        return replicated:GetDescendants()
+    end)
+    if not ok then
+        return nil
+    end
+
+    for _, object in ipairs(descendants) do
+        if object:IsA("RemoteEvent") then
+            local name = tostring(object.Name)
+            if name == "RE/CollectedDragonEgg" or name == "CollectedDragonEgg" then
+                return object
+            end
+        end
+    end
+    return nil
+end
+
+local function DragonEggRemoteReady(silent)
+    local remote = FindCollectedDragonEggRemote()
+    if remote then
+        return true, remote
+    end
+    if not silent then
+        WarnOnce(
+            "CollectedDragonEggRemote",
+            "RemoteEvent RE/CollectedDragonEgg não está disponível; Auto Collect Dragon Eggs ficará desativado para não chamar uma rota inexistente."
+        )
+    end
+    return false, nil
+end
 TeleportService = game:GetService("TeleportService")
 TW = game:GetService("TweenService")
 Lighting = game:GetService("Lighting")
@@ -341,8 +425,20 @@ Num_self = 25
 
 DebugPrint("Bootstrap", "Serviços e dados principais inicializados.")
 
+SafeTaskSpawn("PrehistoricNetDiagnostic", function()
+    task.wait(5)
+    if not DragonEggRemoteReady(true) then
+        DebugWarn(
+            "BloxFruits/Prehistoric",
+            "RE/CollectedDragonEgg não foi encontrado. O hub não criará nem falsificará esse RemoteEvent; a automação de ovos permanecerá desligada."
+        )
+    else
+        DebugPrint("BloxFruits/Prehistoric", "RE/CollectedDragonEgg detectado.")
+    end
+end)
+
 -- Auto-team é isolado: se o Remote mudar, o restante do hub continua carregando.
-task.spawn(function()
+SafeTaskSpawn("L345", function()
     local ok, err = pcall(function()
         local remotes = replicated:WaitForChild("Remotes", 20)
         assert(remotes, "ReplicatedStorage.Remotes não encontrado")
@@ -359,7 +455,7 @@ end)
 -- IMPORTANTE: desligado por padrão no modo estável.
 -- O Koby é um segundo script independente e pode gerar erros assíncronos que
 -- não podem ser capturados pelo pcall deste arquivo depois que ele cria task.spawn/connections.
-task.spawn(function()
+SafeTaskSpawn("L362", function()
     if not ENABLE_KOBY_AUTOLOAD then
         DebugPrint("AutoLoad/Koby", "DESATIVADO no modo estável. O SlayerHub continuará sem ele.")
         return
@@ -1104,8 +1200,8 @@ block.CanTouch = false
 block.Transparency = 1
 local blockfind = workspace:FindFirstChild(block.Name)
 if blockfind and blockfind ~= block then blockfind:Destroy() end
-task.spawn(function()while task.wait()do if block and block.Parent==workspace then if shouldTween then getgenv().OnFarm=true else getgenv().OnFarm=false end else getgenv().OnFarm=false end end end)
-task.spawn(function()local a=game.Players.LocalPlayer;repeat task.wait()until a.Character and a.Character.PrimaryPart;block.CFrame=a.Character.PrimaryPart.CFrame;while task.wait()do pcall(function()if getgenv().OnFarm then if block and block.Parent==workspace then local b=a.Character and a.Character.PrimaryPart;if b and(b.Position-block.Position).Magnitude<=200 then b.CFrame=block.CFrame else block.CFrame=b.CFrame end end;local c=a.Character;if c then for d,e in pairs(c:GetChildren())do if e:IsA("BasePart")then e.CanCollide=false end end end else local c=a.Character;if c then for d,e in pairs(c:GetChildren())do if e:IsA("BasePart")then e.CanCollide=true end end end end end)end end)
+SafeTaskSpawn("L1107", function()while task.wait()do if block and block.Parent==workspace then if shouldTween then getgenv().OnFarm=true else getgenv().OnFarm=false end else getgenv().OnFarm=false end end end)
+SafeTaskSpawn("L1108", function()local a=game.Players.LocalPlayer;repeat task.wait()until a.Character and a.Character.PrimaryPart;block.CFrame=a.Character.PrimaryPart.CFrame;while task.wait()do pcall(function()if getgenv().OnFarm then if block and block.Parent==workspace then local b=a.Character and a.Character.PrimaryPart;if b and(b.Position-block.Position).Magnitude<=200 then b.CFrame=block.CFrame else block.CFrame=b.CFrame end end;local c=a.Character;if c then for d,e in pairs(c:GetChildren())do if e:IsA("BasePart")then e.CanCollide=false end end end else local c=a.Character;if c then for d,e in pairs(c:GetChildren())do if e:IsA("BasePart")then e.CanCollide=true end end end end end)end end)
 _tp = function(target)
   local character = plr.Character
   if not character or not character:FindFirstChild("HumanoidRootPart") then return end
@@ -1117,7 +1213,7 @@ _tp = function(target)
     block.CFrame = CFrame.new(block.Position.X, target.Y, block.Position.Z)
   end  
   tween:Play()    
-  task.spawn(function() while tween.PlaybackState == Enum.PlaybackState.Playing do if not shouldTween then tween:Cancel() break end task.wait(0.1) end end)
+  SafeTaskSpawn("L1120", function() while tween.PlaybackState == Enum.PlaybackState.Playing do if not shouldTween then tween:Cancel() break end task.wait(0.1) end end)
 end
 TeleportToTarget = function(targetCFrame) if (targetCFrame.Position - plr.Character.HumanoidRootPart.Position).Magnitude > 1000 then _tp(targetCFrame)else _tp(targetCFrame)end end
 notween = function(p) plr.Character.HumanoidRootPart.CFrame = p end
@@ -1139,7 +1235,7 @@ function BTP(p)
         task.wait(0.5)
     until (p.Position - humanoidRootPart.Position).Magnitude <= 2000
 end
-spawn(function()
+SafeTaskSpawn("L1142", function()
   while task.wait() do
     pcall(function()
       if _G.SailBoat_Hydra or _G.WardenBoss or _G.AutoFactory or _G.HighestMirage or _G.HCM or _G.PGB or _G.Leviathan1 or _G.UPGDrago or _G.Complete_Trials or _G.TpDrago_Prehis or _G.BuyDrago or _G.AutoFireFlowers or _G.DT_Uzoth or _G.AutoBerry or _G.Prehis_Find or _G.Prehis_Skills or _G.Prehis_DB or _G.Prehis_DE or _G.FarmBlazeEM or _G.Dojoo or _G.CollectPresent or _G.AutoLawKak or _G.TpLab or _G.AutoPhoenixF or _G.AutoFarmChest or _G.AutoHytHallow or _G.LongsWord or _G.BlackSpikey or _G.AutoHolyTorch or _G.TrainDrago  or _G.AutoSaber or _G.FarmMastery_Dev or _G.CitizenQuest or _G.AutoEctoplasm or _G.KeysRen or _G.Auto_Rainbow_Haki or _G.obsFarm or _G.AutoBigmom or _G.Doughv2 or _G.AuraBoss or _G.Raiding or _G.Auto_Cavender or _G.TpPly or _G.Bartilo_Quest or _G.Level or _G.FarmEliteHunt or _G.AutoZou or _G.AutoFarm_Bone or getgenv().AutoMaterial or _G.CraftVM or _G.FrozenTP or _G.TPDoor or _G.AcientOne or _G.AutoFarmNear or _G.AutoRaidCastle or _G.DarkBladev3 or _G.AutoFarmRaid or _G.Auto_Cake_Prince or _G.Addealer or _G.TPNpc or _G.TwinHook or _G.FindMirage or _G.FarmChestM or _G.Shark or _G.TerrorShark or _G.Piranha or _G.MobCrew or _G.SeaBeast1 or _G.FishBoat or _G.AutoPole or _G.AutoPoleV2 or _G.Auto_SuperHuman or _G.AutoDeathStep or _G.Auto_SharkMan_Karate or _G.Auto_Electric_Claw or _G.AutoDragonTalon or _G.Auto_Def_DarkCoat or _G.Auto_God_Human or _G.Auto_Tushita or _G.AutoMatSoul or _G.AutoKenVTWO or _G.AutoSerpentBow or _G.AutoFMon or _G.Auto_Soul_Guitar or _G.TPGEAR or _G.AutoSaw or _G.AutoTridentW2 or _G.Auto_StartRaid or _G.AutoEvoRace or _G.AutoGetQuestBounty or _G.MarinesCoat or _G.TravelDres or _G.Defeating or _G.DummyMan or _G.Auto_Yama or _G.Auto_SwanGG or _G.SwanCoat or _G.AutoEcBoss or _G.Auto_Mink or _G.Auto_Human or _G.Auto_Skypiea or _G.Auto_Fish or _G.CDK_TS or _G.CDK_YM or _G.CDK or _G.AutoFarmGodChalice or _G.AutoFistDarkness or _G.AutoMiror or _G.Teleport or _G.AutoKilo or _G.AutoGetUsoap or _G.Praying or _G.TryLucky or _G.AutoColShad or _G.AutoUnHaki or _G.Auto_DonAcces or _G.AutoRipIngay or _G.DragoV3 or _G.DragoV1 or _G.SailBoats or NextIs or _G.FarmGodChalice or _G.IceBossRen or senth or senth2 or _G.Lvthan or _G.beasthunter or _G.DangerLV or _G.Relic123 or _G.tweenKitsune or _G.Collect_Ember or _G.AutofindKitIs or _G.snaguine or _G.TwFruits or _G.tweenKitShrine or _G.Tp_LgS or _G.Tp_MasterA or _G.tweenShrine or _G.FarmMastery_G or _G.FarmMastery_S then
@@ -1254,41 +1350,588 @@ QuestNeta = function()
   }
 end
 
--- ===== ETAPA 4: UI externa =====
-local Fluent = SafeHttpLoad(
-  "https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua",
-  "Fluent UI"
-)
+-- ===== ETAPA 4: UI EMBUTIDA / sem loadstring externo =====
+-- Esta implementação expõe somente a API usada por este hub:
+-- CreateWindow, AddTab, AddSection, AddParagraph, AddButton, AddToggle,
+-- AddDropdown, AddSlider, AddInput, OnChanged, SetValue, SetDesc e SelectTab.
+-- Isso remove uma fonte inteira de erros assíncronos vindos de bibliotecas externas.
 
-if not Fluent then
-  DebugWarn("Fluent UI", "Não foi possível carregar a biblioteca. O script será encerrado antes de criar a interface.")
-  return
+local function SafeUICallback(label, callback, ...)
+    if typeof(callback) ~= "function" then
+        return true
+    end
+    local args = table.pack(...)
+    local ok, err = xpcall(function()
+        callback(table.unpack(args, 1, args.n))
+    end, __FormatTrace)
+    if not ok then
+        DebugWarn("UI/" .. tostring(label), err)
+    end
+    return ok
 end
-if typeof(Fluent) ~= "table" or typeof(Fluent.CreateWindow) ~= "function" then
-  DebugWarn("Fluent UI", "A biblioteca carregou, mas não retornou uma API Fluent válida (CreateWindow ausente).")
-  return
+
+local function ResolveUIParent()
+    if ExecutorCapabilities.gethui then
+        local ok, hui = pcall(gethui)
+        if ok and hui then
+            return hui
+        end
+    end
+
+    local coreGui = game:GetService("CoreGui")
+    local okCore = pcall(function()
+        local _ = coreGui.Name
+    end)
+    if okCore then
+        return coreGui
+    end
+
+    return plr:WaitForChild("PlayerGui")
 end
-DebugPrint("Fluent UI", "API validada; CreateWindow disponível.")
+
+local function NewCorner(parent, radius)
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, radius or 6)
+    corner.Parent = parent
+    return corner
+end
+
+local function NewPadding(parent, left, right, top, bottom)
+    local padding = Instance.new("UIPadding")
+    padding.PaddingLeft = UDim.new(0, left or 0)
+    padding.PaddingRight = UDim.new(0, right or 0)
+    padding.PaddingTop = UDim.new(0, top or 0)
+    padding.PaddingBottom = UDim.new(0, bottom or 0)
+    padding.Parent = parent
+    return padding
+end
+
+local function CreateEmbeddedFluent()
+    local Library = {
+        Version = "Embedded-XenoSafe-2",
+        Options = {}
+    }
+
+    function Library:CreateWindow(config)
+        config = config or {}
+
+        local parent = ResolveUIParent()
+        local old = parent and parent:FindFirstChild("SlayerHub_EmbeddedUI")
+        if old then
+            pcall(function() old:Destroy() end)
+        end
+
+        local gui = Instance.new("ScreenGui")
+        gui.Name = "SlayerHub_EmbeddedUI"
+        gui.ResetOnSpawn = false
+        gui.IgnoreGuiInset = false
+        gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+        local parentOk, parentErr = pcall(function()
+            gui.Parent = parent
+        end)
+        if not parentOk then
+            local playerGui = plr:FindFirstChild("PlayerGui") or plr:WaitForChild("PlayerGui", 10)
+            if not playerGui then
+                error("Não foi possível encontrar um parent válido para a UI: " .. tostring(parentErr))
+            end
+            gui.Parent = playerGui
+        end
+
+        local main = Instance.new("Frame")
+        main.Name = "Main"
+        main.Size = config.Size or UDim2.fromOffset(660, 440)
+        main.Position = UDim2.new(0.5, -330, 0.5, -220)
+        main.BackgroundColor3 = Color3.fromRGB(22, 22, 27)
+        main.BorderSizePixel = 0
+        main.Parent = gui
+        NewCorner(main, 8)
+
+        local top = Instance.new("Frame")
+        top.Name = "Top"
+        top.Size = UDim2.new(1, 0, 0, 48)
+        top.BackgroundColor3 = Color3.fromRGB(28, 28, 34)
+        top.BorderSizePixel = 0
+        top.Parent = main
+        NewCorner(top, 8)
+
+        local title = Instance.new("TextLabel")
+        title.BackgroundTransparency = 1
+        title.Size = UDim2.new(1, -24, 0, 24)
+        title.Position = UDim2.fromOffset(12, 4)
+        title.Font = Enum.Font.GothamBold
+        title.TextSize = 16
+        title.TextXAlignment = Enum.TextXAlignment.Left
+        title.TextColor3 = Color3.fromRGB(240, 240, 245)
+        title.Text = tostring(config.Title or "SlayerHub")
+        title.Parent = top
+
+        local subtitle = Instance.new("TextLabel")
+        subtitle.BackgroundTransparency = 1
+        subtitle.Size = UDim2.new(1, -24, 0, 16)
+        subtitle.Position = UDim2.fromOffset(12, 26)
+        subtitle.Font = Enum.Font.Gotham
+        subtitle.TextSize = 11
+        subtitle.TextXAlignment = Enum.TextXAlignment.Left
+        subtitle.TextColor3 = Color3.fromRGB(165, 165, 175)
+        subtitle.Text = tostring(config.SubTitle or "")
+        subtitle.Parent = top
+
+        local tabBar = Instance.new("ScrollingFrame")
+        tabBar.Name = "Tabs"
+        tabBar.Position = UDim2.fromOffset(0, 52)
+        tabBar.Size = UDim2.new(0, config.TabWidth or 180, 1, -52)
+        tabBar.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+        tabBar.BorderSizePixel = 0
+        tabBar.ScrollBarThickness = 3
+        tabBar.AutomaticCanvasSize = Enum.AutomaticSize.Y
+        tabBar.CanvasSize = UDim2.new()
+        tabBar.Parent = main
+        NewPadding(tabBar, 6, 6, 6, 6)
+
+        local tabLayout = Instance.new("UIListLayout")
+        tabLayout.Padding = UDim.new(0, 4)
+        tabLayout.SortOrder = Enum.SortOrder.LayoutOrder
+        tabLayout.Parent = tabBar
+
+        local pages = Instance.new("Frame")
+        pages.Name = "Pages"
+        pages.Position = UDim2.fromOffset((config.TabWidth or 180) + 4, 52)
+        pages.Size = UDim2.new(1, -(config.TabWidth or 180) - 4, 1, -52)
+        pages.BackgroundTransparency = 1
+        pages.ClipsDescendants = true
+        pages.Parent = main
+
+        -- Janela arrastável pela barra superior.
+        local dragging = false
+        local dragStart
+        local startPos
+        top.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                dragging = true
+                dragStart = input.Position
+                startPos = main.Position
+            end
+        end)
+        top.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                dragging = false
+            end
+        end)
+        game:GetService("UserInputService").InputChanged:Connect(function(input)
+            if dragging and input.UserInputType == Enum.UserInputType.MouseMovement and dragStart and startPos then
+                local delta = input.Position - dragStart
+                main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+            end
+        end)
+
+        local Window = {
+            _gui = gui,
+            _main = main,
+            _tabs = {},
+            _selected = nil,
+        }
+
+        local function MakeElementFrame(page, height)
+            local frame = Instance.new("Frame")
+            frame.Size = UDim2.new(1, -10, 0, height or 42)
+            frame.BackgroundColor3 = Color3.fromRGB(31, 31, 38)
+            frame.BorderSizePixel = 0
+            frame.Parent = page
+            NewCorner(frame, 6)
+            return frame
+        end
+
+        local function MakeLabel(frame, text, description)
+            local label = Instance.new("TextLabel")
+            label.BackgroundTransparency = 1
+            label.Position = UDim2.fromOffset(10, 4)
+            label.Size = UDim2.new(1, -110, description and 0 or 1, description and 18 or -8)
+            label.Font = Enum.Font.GothamMedium
+            label.TextSize = 13
+            label.TextXAlignment = Enum.TextXAlignment.Left
+            label.TextColor3 = Color3.fromRGB(235, 235, 240)
+            label.Text = tostring(text or "")
+            label.Parent = frame
+
+            if description and tostring(description) ~= "" then
+                local desc = Instance.new("TextLabel")
+                desc.BackgroundTransparency = 1
+                desc.Position = UDim2.fromOffset(10, 22)
+                desc.Size = UDim2.new(1, -110, 0, 15)
+                desc.Font = Enum.Font.Gotham
+                desc.TextSize = 10
+                desc.TextXAlignment = Enum.TextXAlignment.Left
+                desc.TextColor3 = Color3.fromRGB(150, 150, 160)
+                desc.Text = tostring(description)
+                desc.Parent = frame
+            end
+            return label
+        end
+
+        function Window:SelectTab(index)
+            local numeric = tonumber(index)
+            if not numeric or not self._tabs[numeric] then
+                return false
+            end
+            for i, tab in ipairs(self._tabs) do
+                tab._page.Visible = (i == numeric)
+                tab._button.BackgroundColor3 = (i == numeric) and Color3.fromRGB(50, 50, 62) or Color3.fromRGB(31, 31, 38)
+            end
+            self._selected = numeric
+            return true
+        end
+
+        function Window:AddTab(info)
+            info = info or {}
+            local index = #self._tabs + 1
+
+            local button = Instance.new("TextButton")
+            button.Name = "Tab" .. index
+            button.Size = UDim2.new(1, 0, 0, 34)
+            button.BackgroundColor3 = Color3.fromRGB(31, 31, 38)
+            button.BorderSizePixel = 0
+            button.AutoButtonColor = true
+            button.Font = Enum.Font.GothamMedium
+            button.TextSize = 12
+            button.TextXAlignment = Enum.TextXAlignment.Left
+            button.TextColor3 = Color3.fromRGB(230, 230, 235)
+            button.Text = "  " .. tostring(info.Title or ("Tab " .. index))
+            button.LayoutOrder = index
+            button.Parent = tabBar
+            NewCorner(button, 5)
+
+            local page = Instance.new("ScrollingFrame")
+            page.Name = "Page" .. index
+            page.Size = UDim2.fromScale(1, 1)
+            page.BackgroundTransparency = 1
+            page.BorderSizePixel = 0
+            page.ScrollBarThickness = 4
+            page.AutomaticCanvasSize = Enum.AutomaticSize.Y
+            page.CanvasSize = UDim2.new()
+            page.Visible = false
+            page.Parent = pages
+            NewPadding(page, 6, 6, 6, 6)
+
+            local layout = Instance.new("UIListLayout")
+            layout.Padding = UDim.new(0, 5)
+            layout.SortOrder = Enum.SortOrder.LayoutOrder
+            layout.Parent = page
+
+            local Tab = {
+                _page = page,
+                _button = button,
+                _window = self,
+            }
+
+            function Tab:AddSection(text)
+                local section = Instance.new("TextLabel")
+                section.Size = UDim2.new(1, -10, 0, 28)
+                section.BackgroundTransparency = 1
+                section.Font = Enum.Font.GothamBold
+                section.TextSize = 12
+                section.TextXAlignment = Enum.TextXAlignment.Left
+                section.TextColor3 = Color3.fromRGB(180, 180, 195)
+                section.Text = tostring(text or "")
+                section.Parent = page
+                return section
+            end
+
+            function Tab:AddParagraph(info2)
+                info2 = info2 or {}
+                local frame = MakeElementFrame(page, 52)
+                local titleLabel = MakeLabel(frame, info2.Title or "", nil)
+                titleLabel.Size = UDim2.new(1, -20, 0, 18)
+                local content = Instance.new("TextLabel")
+                content.BackgroundTransparency = 1
+                content.Position = UDim2.fromOffset(10, 25)
+                content.Size = UDim2.new(1, -20, 0, 20)
+                content.Font = Enum.Font.Gotham
+                content.TextSize = 11
+                content.TextXAlignment = Enum.TextXAlignment.Left
+                content.TextColor3 = Color3.fromRGB(165, 165, 175)
+                content.Text = tostring(info2.Content or "")
+                content.TextWrapped = true
+                content.Parent = frame
+
+                local object = {}
+                function object:SetDesc(value)
+                    content.Text = tostring(value or "")
+                end
+                return object
+            end
+
+            function Tab:AddButton(info2)
+                info2 = info2 or {}
+                local frame = MakeElementFrame(page, 44)
+                MakeLabel(frame, info2.Title or "Button", info2.Description)
+                local button2 = Instance.new("TextButton")
+                button2.Size = UDim2.fromOffset(76, 28)
+                button2.Position = UDim2.new(1, -86, 0.5, -14)
+                button2.BackgroundColor3 = Color3.fromRGB(55, 55, 68)
+                button2.BorderSizePixel = 0
+                button2.Font = Enum.Font.GothamBold
+                button2.TextSize = 11
+                button2.TextColor3 = Color3.fromRGB(240, 240, 245)
+                button2.Text = "RUN"
+                button2.Parent = frame
+                NewCorner(button2, 5)
+                button2.MouseButton1Click:Connect(function()
+                    SafeUICallback("Button/" .. tostring(info2.Title), info2.Callback)
+                end)
+                return button2
+            end
+
+            function Tab:AddToggle(id, info2)
+                info2 = info2 or {}
+                local frame = MakeElementFrame(page, 44)
+                MakeLabel(frame, info2.Title or id or "Toggle", info2.Description)
+                local button2 = Instance.new("TextButton")
+                button2.Size = UDim2.fromOffset(60, 26)
+                button2.Position = UDim2.new(1, -70, 0.5, -13)
+                button2.BorderSizePixel = 0
+                button2.Font = Enum.Font.GothamBold
+                button2.TextSize = 10
+                button2.TextColor3 = Color3.fromRGB(245, 245, 245)
+                button2.Parent = frame
+                NewCorner(button2, 13)
+
+                local object = {
+                    Value = info2.Default == true,
+                    _callbacks = {}
+                }
+
+                local function redraw()
+                    button2.Text = object.Value and "ON" or "OFF"
+                    button2.BackgroundColor3 = object.Value and Color3.fromRGB(62, 120, 82) or Color3.fromRGB(75, 75, 84)
+                end
+
+                function object:OnChanged(callback)
+                    if typeof(callback) == "function" then
+                        table.insert(self._callbacks, callback)
+                    end
+                    return self
+                end
+
+                function object:SetValue(value)
+                    local normalized = value == true
+                    if self.Value == normalized then
+                        redraw()
+                        return
+                    end
+                    self.Value = normalized
+                    redraw()
+                    for _, cb in ipairs(self._callbacks) do
+                        SafeUICallback("Toggle/" .. tostring(id), cb, self.Value)
+                    end
+                    SafeUICallback("ToggleCallback/" .. tostring(id), info2.Callback, self.Value)
+                end
+
+                button2.MouseButton1Click:Connect(function()
+                    object:SetValue(not object.Value)
+                end)
+                redraw()
+                Library.Options[id] = object
+                return object
+            end
+
+            function Tab:AddDropdown(id, info2)
+                info2 = info2 or {}
+                local values = info2.Values or {}
+                local frame = MakeElementFrame(page, 44)
+                MakeLabel(frame, info2.Title or id or "Dropdown", nil)
+                local button2 = Instance.new("TextButton")
+                button2.Size = UDim2.fromOffset(130, 28)
+                button2.Position = UDim2.new(1, -140, 0.5, -14)
+                button2.BackgroundColor3 = Color3.fromRGB(55, 55, 68)
+                button2.BorderSizePixel = 0
+                button2.Font = Enum.Font.Gotham
+                button2.TextSize = 10
+                button2.TextColor3 = Color3.fromRGB(240, 240, 245)
+                button2.Parent = frame
+                NewCorner(button2, 5)
+
+                local initialIndex = 1
+                if typeof(info2.Default) == "number" then
+                    initialIndex = math.clamp(math.floor(info2.Default), 1, math.max(#values, 1))
+                elseif info2.Default ~= nil then
+                    for i, value in ipairs(values) do
+                        if value == info2.Default then initialIndex = i break end
+                    end
+                end
+
+                local object = {
+                    Value = values[initialIndex],
+                    _index = initialIndex,
+                    _callbacks = {}
+                }
+
+                local function redraw()
+                    button2.Text = tostring(object.Value or "Select")
+                end
+
+                function object:OnChanged(callback)
+                    if typeof(callback) == "function" then table.insert(self._callbacks, callback) end
+                    return self
+                end
+
+                function object:SetValue(value)
+                    local foundIndex
+                    if typeof(value) == "number" and values[value] ~= nil then
+                        foundIndex = value
+                    else
+                        for i, v in ipairs(values) do
+                            if v == value then foundIndex = i break end
+                        end
+                    end
+                    if not foundIndex then return end
+                    self._index = foundIndex
+                    self.Value = values[foundIndex]
+                    redraw()
+                    for _, cb in ipairs(self._callbacks) do
+                        SafeUICallback("Dropdown/" .. tostring(id), cb, self.Value)
+                    end
+                    SafeUICallback("DropdownCallback/" .. tostring(id), info2.Callback, self.Value)
+                end
+
+                button2.MouseButton1Click:Connect(function()
+                    if #values == 0 then return end
+                    local nextIndex = object._index + 1
+                    if nextIndex > #values then nextIndex = 1 end
+                    object:SetValue(nextIndex)
+                end)
+                redraw()
+                Library.Options[id] = object
+                return object
+            end
+
+            function Tab:AddSlider(id, info2)
+                info2 = info2 or {}
+                local frame = MakeElementFrame(page, 44)
+                MakeLabel(frame, info2.Title or id or "Slider", info2.Description)
+                local box = Instance.new("TextBox")
+                box.Size = UDim2.fromOffset(84, 28)
+                box.Position = UDim2.new(1, -94, 0.5, -14)
+                box.BackgroundColor3 = Color3.fromRGB(55, 55, 68)
+                box.BorderSizePixel = 0
+                box.Font = Enum.Font.Gotham
+                box.TextSize = 11
+                box.TextColor3 = Color3.fromRGB(240, 240, 245)
+                box.ClearTextOnFocus = false
+                box.Parent = frame
+                NewCorner(box, 5)
+
+                local minV = tonumber(info2.Min) or 0
+                local maxV = tonumber(info2.Max) or 100
+                local object = {Value = tonumber(info2.Default) or minV, _callbacks = {}}
+
+                function object:OnChanged(callback)
+                    if typeof(callback) == "function" then table.insert(self._callbacks, callback) end
+                    return self
+                end
+                function object:SetValue(value)
+                    local n = tonumber(value)
+                    if not n then return end
+                    n = math.clamp(n, minV, maxV)
+                    self.Value = n
+                    box.Text = tostring(n)
+                    for _, cb in ipairs(self._callbacks) do SafeUICallback("Slider/" .. tostring(id), cb, n) end
+                    SafeUICallback("SliderCallback/" .. tostring(id), info2.Callback, n)
+                end
+                box.FocusLost:Connect(function()
+                    object:SetValue(box.Text)
+                end)
+                box.Text = tostring(object.Value)
+                Library.Options[id] = object
+                return object
+            end
+
+            function Tab:AddInput(id, info2)
+                info2 = info2 or {}
+                local frame = MakeElementFrame(page, 44)
+                MakeLabel(frame, info2.Title or id or "Input", nil)
+                local box = Instance.new("TextBox")
+                box.Size = UDim2.fromOffset(150, 28)
+                box.Position = UDim2.new(1, -160, 0.5, -14)
+                box.BackgroundColor3 = Color3.fromRGB(55, 55, 68)
+                box.BorderSizePixel = 0
+                box.Font = Enum.Font.Gotham
+                box.TextSize = 10
+                box.TextColor3 = Color3.fromRGB(240, 240, 245)
+                box.PlaceholderText = tostring(info2.Placeholder or "")
+                box.ClearTextOnFocus = false
+                box.Text = tostring(info2.Default or "")
+                box.Parent = frame
+                NewCorner(box, 5)
+
+                local object = {Value = box.Text, _callbacks = {}}
+                function object:OnChanged(callback)
+                    if typeof(callback) == "function" then table.insert(self._callbacks, callback) end
+                    return self
+                end
+                function object:SetValue(value)
+                    self.Value = tostring(value or "")
+                    box.Text = self.Value
+                    for _, cb in ipairs(self._callbacks) do SafeUICallback("Input/" .. tostring(id), cb, self.Value) end
+                    SafeUICallback("InputCallback/" .. tostring(id), info2.Callback, self.Value)
+                end
+                box.FocusLost:Connect(function()
+                    object:SetValue(box.Text)
+                end)
+                Library.Options[id] = object
+                return object
+            end
+
+            table.insert(self._tabs, Tab)
+            button.MouseButton1Click:Connect(function()
+                self:SelectTab(index)
+            end)
+
+            if index == 1 then
+                self:SelectTab(1)
+            end
+            return Tab
+        end
+
+        local minimizeKey = config.MinimizeKey or Enum.KeyCode.End
+        game:GetService("UserInputService").InputBegan:Connect(function(input, processed)
+            if not processed and input.KeyCode == minimizeKey then
+                main.Visible = not main.Visible
+            end
+        end)
+
+        function Window:Destroy()
+            if self._gui then pcall(function() self._gui:Destroy() end) end
+        end
+
+        return Window
+    end
+
+    return Library
+end
+
+local Fluent = CreateEmbeddedFluent()
+DebugPrint("UI", "UI embutida carregada; nenhuma biblioteca externa foi executada.")
 
 local windowOk, windowOrError = pcall(function()
-  return Fluent:CreateWindow({
-    Title = "Slayerhub",
-    SubTitle = "| By:Slayer ",
-    TabWidth = 180,
-    Size = UDim2.fromOffset(660, 440),
-    Acrylic = false,
-    Theme = "Dark",
-    MinimizeKey = Enum.KeyCode.End
-  })
+    return Fluent:CreateWindow({
+        Title = "Slayerhub",
+        SubTitle = "| By:Slayer | Xeno Safe V2",
+        TabWidth = 180,
+        Size = UDim2.fromOffset(660, 440),
+        Acrylic = false,
+        Theme = "Dark",
+        MinimizeKey = Enum.KeyCode.End
+    })
 end)
 
-if not windowOk then
-  DebugWarn("Fluent UI", "CreateWindow falhou:", windowOrError)
-  return
+if not windowOk or not windowOrError then
+    DebugWarn("UI", "CreateWindow embutido falhou:", windowOrError)
+    return
 end
 
 local Window = windowOrError
-DebugPrint("Fluent UI", "janela criada com sucesso.")
+DebugPrint("UI", "janela embutida criada com sucesso.")
 	
 -- Services
 local CoreGui = game:GetService("CoreGui")
@@ -1401,7 +2044,7 @@ local FarmLevel = Tabs.Main:AddToggle("FarmLevel", {Title = "Auto Farm Level", D
 FarmLevel:OnChanged(function(Value)
   _G.Level = Value
 end)
-spawn(function()
+SafeTaskSpawn("L1404", function()
   while wait(Sec) do
 	if _G.Level then
 	  pcall(function()
@@ -1433,7 +2076,7 @@ local TravelDress = Tabs.Main:AddToggle("TravelDress", {Title = "Auto Travel Dre
 TravelDress:OnChanged(function(Value)
   _G.TravelDres = Value
 end)
-spawn(function()
+SafeTaskSpawn("L1436", function()
   while wait(Sec) do
     pcall(function()
       if _G.TravelDres then
@@ -1465,7 +2108,7 @@ local Zou = Tabs.Main:AddToggle("Zou", {Title = "Auto Zou Quest", Description = 
 Zou:OnChanged(function(Value)
   _G.AutoZou = Value
 end)
-spawn(function()
+SafeTaskSpawn("L1468", function()
   while wait(Sec) do
     pcall(function()
       if _G.AutoZou then
@@ -1575,7 +2218,7 @@ local ClosetMons = Tabs.Main:AddToggle("ClosetMons", {Title = "Auto Farm Nearest
 ClosetMons:OnChanged(function(Value)
   _G.AutoFarmNear = Value
 end)
-spawn(function()
+SafeTaskSpawn("L1578", function()
   while wait() do
     pcall(function()
       if _G.AutoFarmNear then
@@ -1594,7 +2237,7 @@ local FactoryRaids = Tabs.Main:AddToggle("FactoryRaids", {Title = "Auto Factory 
 FactoryRaids:OnChanged(function(Value)
   _G.AutoFactory = Value
 end)
-spawn(function()
+SafeTaskSpawn("L1597", function()
   while wait(Sec) do
     pcall(function()
       if _G.AutoFactory then
@@ -1615,7 +2258,7 @@ local CastleRaids = Tabs.Main:AddToggle("CastleRaids", {Title = "Auto Pirate Rai
 CastleRaids:OnChanged(function(Value)
   _G.AutoRaidCastle = Value
 end)
-spawn(function()
+SafeTaskSpawn("L1618", function()
   while wait(Sec) do
     if _G.AutoRaidCastle then
       pcall(function()
@@ -1652,7 +2295,7 @@ Toggle = Tabs.Main:AddToggle("Toggle", {Title = "Auto Materials", Description = 
 Toggle:OnChanged(function(Value)
     getgenv().AutoMaterial = Value
 end)
-spawn(function()
+SafeTaskSpawn("L1655", function()
   local function processEnemy(v, EnemyName)
     if v:FindFirstChild("Humanoid") and v:FindFirstChild("HumanoidRootPart") and v.Humanoid.Health > 0 then
       if v.Name == EnemyName then repeat wait() Attack.Kill(v,getgenv().AutoMaterial) until not getgenv().AutoMaterial or not v.Parent or v.Humanoid.Health <= 0 end
@@ -1685,7 +2328,7 @@ local Q = Tabs.Main:AddToggle("Q", {Title = "Auto Farm Ectoplasm", Description =
 Q:OnChanged(function(Value)
   _G.AutoEctoplasm = Value
 end)
-spawn(function()
+SafeTaskSpawn("L1688", function()
   while wait(Sec) do
     pcall(function()
       if _G.AutoEctoplasm then
@@ -1704,7 +2347,7 @@ local Bartilo = Tabs.Main:AddToggle("Bartilo", {Title = "Auto Done Bartilo Quest
 Bartilo:OnChanged(function(Value)
   _G.Bartilo_Quest = Value
 end)
-spawn(function()
+SafeTaskSpawn("L1707", function()
   while wait(.1) do    
     pcall(function()
       if _G.Bartilo_Quest and Lv >= 850 then
@@ -1768,7 +2411,7 @@ local CitizenQ = Tabs.Main:AddToggle("CitizenQ", {Title = "Auto Done Citizen Que
 CitizenQ:OnChanged(function(Value)
   _G.CitizenQuest = Value
 end)
-spawn(function()	
+SafeTaskSpawn("L1771", function()	
   while wait(Sec) do
     pcall(function()
       if _G.CitizenQuest then
@@ -1812,7 +2455,7 @@ local Q = Tabs.Main:AddToggle("Q", {Title = "Auto Training Dummy", Description =
 Q:OnChanged(function(Value)
   _G.DummyMan = Value
 end)
-spawn(function()
+SafeTaskSpawn("L1815", function()
   while wait(Sec) do
     if _G.DummyMan then
       pcall(function()
@@ -1835,7 +2478,7 @@ local Berry = Tabs.Main:AddToggle("Berry", {Title = "Auto Collect Berry", Descri
 Berry:OnChanged(function(Value)
   _G.AutoBerry = Value
 end)
-spawn(function()
+SafeTaskSpawn("L1838", function()
   while wait(Sec) do
     if _G.AutoBerry then
       local CollectionService= game:GetService("CollectionService")
@@ -1867,7 +2510,7 @@ local Chest = Tabs.Main:AddToggle("Chest", {Title = "Auto Collect Chest", Descri
 Chest:OnChanged(function(Value)
   _G.AutoFarmChest = Value
 end)
-spawn(function()
+SafeTaskSpawn("L1870", function()
   while wait(Sec) do
     if _G.AutoFarmChest then
       pcall(function()
@@ -1904,8 +2547,8 @@ local MasteryFruits = Tabs.Main:AddToggle("MasteryFruits", {Title = "Auto Master
 MasteryFruits:OnChanged(function(Value)
   _G.FarmMastery_Dev = Value
 end)
-spawn(function()RunSer.RenderStepped:Connect(function() pcall(function()if _G.FarmMastery_Dev or _G.FarmMastery_G or _G.FarmMastery_S then for a,b in pairs(plr.PlayerGui.Notifications:GetChildren())do if b.Name=="NotificationTemplate"then if string.find(b.Text,"Skill locked!")then b:Destroy()end end end end end)end) end)
-spawn(function()
+SafeTaskSpawn("L1907", function()RunSer.RenderStepped:Connect(function() pcall(function()if _G.FarmMastery_Dev or _G.FarmMastery_G or _G.FarmMastery_S then for a,b in pairs(plr.PlayerGui.Notifications:GetChildren())do if b.Name=="NotificationTemplate"then if string.find(b.Text,"Skill locked!")then b:Destroy()end end end end end)end) end)
+SafeTaskSpawn("L1908", function()
   while wait(Sec) do
     if _G.FarmMastery_Dev then
       pcall(function()
@@ -1940,7 +2583,7 @@ local MasteryGun = Tabs.Main:AddToggle("MasteryGun", {Title = "Auto Mastery Gun"
 MasteryGun:OnChanged(function(Value)
   _G.FarmMastery_G = Value
 end)
-spawn(function()
+SafeTaskSpawn("L1943", function()
   while wait(Sec) do
     if _G.FarmMastery_G then
       pcall(function()
@@ -2015,7 +2658,7 @@ local MasterySword = Tabs.Main:AddToggle("MasterySword", {Title = "Auto Mastery 
 MasterySword:OnChanged(function(Value)
   _G.FarmMastery_S = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2018", function()
   while wait(Sec) do
     pcall(function()
       if _G.FarmMastery_S then
@@ -2076,7 +2719,7 @@ local MobKilled = Tabs.Main:AddParagraph({
     Title = "Cake Princes :",
     Content = ""
 })
-spawn(function()
+SafeTaskSpawn("L2079", function()
   while wait(.2) do
     pcall(function()
   	  local Killed = string.match(replicated.Remotes.CommF_:InvokeServer("CakePrinceSpawner"),"%d+")
@@ -2090,7 +2733,7 @@ local CheckingBone = Tabs.Main:AddParagraph({
     Title = " Bones :",
     Content = ""
 })
-spawn(function()
+SafeTaskSpawn("L2093", function()
   while wait(.2) do
     pcall(function()
       CheckingBone:SetDesc(" Bones : " ..GetM("Bones"))          
@@ -2101,7 +2744,7 @@ local Q = Tabs.Main:AddToggle("Q", {Title = "Auto Cake Prince", Description = ""
 Q:OnChanged(function(Value)
   _G.Auto_Cake_Prince = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2104", function()
   while wait() do
     if _G.Auto_Cake_Prince then
       pcall(function()
@@ -2157,7 +2800,7 @@ local Q = Tabs.Main:AddToggle("Q", {Title = "Auto Bones", Description = "", Defa
 Q:OnChanged(function(Value)
   _G.AutoFarm_Bone = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2160", function()
   while wait(Sec) do 
     if _G.AutoFarm_Bone then
       pcall(function()        
@@ -2201,7 +2844,7 @@ local Q = Tabs.Main:AddToggle("Q", {Title = "Auto Farm Mirror", Description = ""
 Q:OnChanged(function(Value)
   _G.AutoMiror = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2204", function()
   while wait(Sec) do
     if _G.AutoMiror then
       pcall(function()
@@ -2219,7 +2862,7 @@ local Q = Tabs.Main:AddToggle("Q", {Title = "Auto Soul Reaper [Fully]", Descript
 Q:OnChanged(function(Value)
   _G.AutoHytHallow = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2222", function()
   while wait(Sec) do
     if _G.AutoHytHallow then
       pcall(function()
@@ -2242,7 +2885,7 @@ local Q = Tabs.Main:AddToggle("Q", {Title = "Auto Random Bones", Description = "
 Q:OnChanged(function(Value)
   _G.Auto_Random_Bone = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2245", function()
   while wait(Sec) do
     pcall(function()
       if _G.Auto_Random_Bone then    
@@ -2255,7 +2898,7 @@ local Q = Tabs.Main:AddToggle("Q", {Title = "Auto Try Luck Gravestone", Descript
 Q:OnChanged(function(Value)
   _G.TryLucky = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2258", function()
   while wait(Sec) do
     if _G.TryLucky then
     local try_bones_luck = CFrame.new(-8761.3154296875, 164.85829162598, 6161.1567382813)
@@ -2271,7 +2914,7 @@ local Q = Tabs.Main:AddToggle("Q", {Title = "Auto Pray Gravestone", Description 
 Q:OnChanged(function(Value)
   _G.Praying = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2274", function()
   while wait(Sec) do
     if _G.Praying then
     local try_bones_luck = CFrame.new(-8761.3154296875, 164.85829162598, 6161.1567382813)
@@ -2289,7 +2932,7 @@ local Q = Tabs.Main:AddToggle("Q", {Title = "Auto Unlock Dough dungeon", Descrip
 Q:OnChanged(function(Value)
   _G.Doughv2 = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2292", function()
   while wait(Sec) do
     if _G.Doughv2 then
       pcall(function()
@@ -2342,7 +2985,7 @@ local Q = Tabs.Main:AddToggle("Q", {Title = "Auto Unlock Phoenix dungeon", Descr
 Q:OnChanged(function(Value)
   _G.AutoPhoenixF = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2345", function()
   while wait(.1) do
     if _G.AutoPhoenixF then
       pcall(function()
@@ -2375,7 +3018,7 @@ local Q = Tabs.Main:AddToggle("Q", {Title = "Auto Teleport Barista Cousin", Desc
 Q:OnChanged(function(Value)
   _G.Tp_MasterA = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2378", function()
   while wait() do
     if _G.Tp_MasterA then
 	  pcall(function()
@@ -2394,7 +3037,7 @@ local Q = Tabs.Main:AddToggle("Q", {Title = "Auto Rainbow Colors", Description =
 Q:OnChanged(function(Value)
   _G.Auto_Rainbow_Haki = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2397", function()
   pcall(function()
     while wait(Sec) do
       if _G.Auto_Rainbow_Haki then
@@ -2469,7 +3112,7 @@ local Q = Tabs.Main:AddToggle("Q", {Title = "Auto Farm Observation", Description
 Q:OnChanged(function(Value)
   _G.obsFarm = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2472", function()
   while wait(.2) do
     pcall(function()
       if _G.obsFarm then        
@@ -2484,7 +3127,7 @@ spawn(function()
     end)
   end
 end)    
-spawn(function()      
+SafeTaskSpawn("L2487", function()      
   while wait(.2) do
     pcall(function()
       if _G.obsFarm then
@@ -2539,7 +3182,7 @@ local Q = Tabs.Main:AddToggle("Q", {Title = "Auto Observation V2", Description =
 Q:OnChanged(function(Value)
   _G.AutoKenVTWO = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2542", function()
   while wait(Sec) do
     if _G.AutoKenVTWO then
       pcall(function()
@@ -2618,7 +3261,7 @@ local Q = Tabs.Main:AddToggle("Q", {Title = "Auto Upgrade Mink V3", Description 
 Q:OnChanged(function(Value)
   _G.Auto_Mink = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2621", function()
   while wait(Sec) do
     pcall(function()
       if _G.Auto_Mink then
@@ -2653,7 +3296,7 @@ local Q = Tabs.Main:AddToggle("Q", {Title = "Auto Upgrade Human V3", Description
 Q:OnChanged(function(Value)
   _G.Auto_Human = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2656", function()
   while wait(Sec) do
     pcall(function()
       if _G.Auto_Human then
@@ -2697,7 +3340,7 @@ local Q = Tabs.Main:AddToggle("Q", {Title = "Auto Upgrade Skypiea V3", Descripti
 Q:OnChanged(function(Value)
   _G.Auto_Skypiea = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2700", function()
   while wait(Sec) do
     pcall(function()
       if _G.Auto_Skypiea then
@@ -2737,7 +3380,7 @@ local Q = Tabs.Main:AddToggle("Q", {Title = "Auto Upgrade FishMan V3", Descripti
 Q:OnChanged(function(Value)
   _G.Auto_Fish = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2740", function()
   while wait(Sec) do
     pcall(function()
       if _G.Auto_Fish then
@@ -2775,7 +3418,7 @@ local Q = Tabs.Main:AddToggle("Q", {Title = "Auto Valkyrie", Description = "", D
 Q:OnChanged(function(Value)
   _G.AutoRipIngay = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2778", function()
   while wait(Sec) do
     pcall(function()
       if _G.AutoRipIngay then
@@ -2805,7 +3448,7 @@ HakiCalculate = function(Part)
   local ID = {["Really red"] = "Pure Red";["Oyster"] = "Snow White";["Hot pink"] = "Winter Sky";};
   if Part and Part.BrickColor then return (ID[tostring(Part.BrickColor)])end;
 end;
-spawn(function()
+SafeTaskSpawn("L2808", function()
   while wait(Sec) do
     if _G.AutoUnHaki then
       pcall(function()
@@ -2832,7 +3475,7 @@ local Weapon_Config = Tabs.Settings:AddDropdown("Weapon_Config",{Title = "Select
 Weapon_Config:OnChanged(function(Value)
   _G.ChooseWP = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2835", function()
   while wait(Sec) do
     pcall(function()
       if _G.ChooseWP == "Melee" then
@@ -2884,7 +3527,7 @@ local BusuAura = Tabs.Settings:AddToggle("BusuAura", {Title = "Auto Turn on Buso
 BusuAura:OnChanged(function(Value)
   Boud = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2887", function()
   while wait(Sec) do
     pcall(function()
       if Boud then
@@ -2899,7 +3542,7 @@ local RaceV3Aura = Tabs.Settings:AddToggle("RaceV3Aura", {Title = "Auto Turn on 
 RaceV3Aura:OnChanged(function(Value)
   _G.RaceClickAutov3 = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2902", function()
   while wait(.2) do
     pcall(function()
       if _G.RaceClickAutov3 then
@@ -2915,7 +3558,7 @@ local RaceV4Aura = Tabs.Settings:AddToggle("RaceV4Aura", {Title = "Auto Turn on 
 RaceV4Aura:OnChanged(function(Value)
   _G.RaceClickAutov4 = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2918", function()
   while wait(.2) do
     pcall(function()
       if _G.RaceClickAutov4 then
@@ -2938,7 +3581,7 @@ local SafeModes = Tabs.Settings:AddToggle("SafeModes", {Title = "Panic Mode", De
 SafeModes:OnChanged(function(Value)
   _G.Safemode = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2941", function()
   while task.wait(Sec) do
     pcall(function()
 	  if _G.Safemode then
@@ -2961,7 +3604,7 @@ local DisblesVFX = Tabs.Settings:AddToggle("DisblesVFX", {Title = "Remove Hit VF
 DisblesVFX:OnChanged(function(Value)
   _G.DistroyHit = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2964", function()
   while wait(Sec) do
     if _G.DistroyHit then
       pcall(function()
@@ -2977,7 +3620,7 @@ local DisblesVFX = Tabs.Settings:AddToggle("DisblesVFX", {Title = "Remove Death 
 DisblesVFX:OnChanged(function(Value)
   RDeath = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2980", function()
   while wait(Sec) do
     pcall(function()
       if RDeath then
@@ -2991,7 +3634,7 @@ local DisblesVFX = Tabs.Settings:AddToggle("DisblesVFX", {Title = "Disable Notif
 DisblesVFX:OnChanged(function(Value)
   RemoveDamage = Value
 end)
-spawn(function()
+SafeTaskSpawn("L2994", function()
   while wait(Sec) do
     pcall(function()
       if RemoveDamage then
@@ -3018,7 +3661,7 @@ local StatsUpg = Tabs.Settings:AddToggle("StatsUpg", {Title = "Auto Melee", Desc
 StatsUpg:OnChanged(function(Value)
   _G.Auto_Melee = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3021", function()
   while wait(Sec) do
     pcall(function()
     if _G.Auto_Melee then statsSetings("Melee",pSats) end
@@ -3030,7 +3673,7 @@ local StatsUpg = Tabs.Settings:AddToggle("StatsUpg", {Title = "Auto Swords", Des
 StatsUpg:OnChanged(function(Value)
   _G.Auto_Sword = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3033", function()
   while wait(Sec) do
     pcall(function()
     if _G.Auto_Sword then statsSetings("Sword",pSats) end
@@ -3041,7 +3684,7 @@ local StatsUpg = Tabs.Settings:AddToggle("StatsUpg", {Title = "Auto Gun", Descri
 StatsUpg:OnChanged(function(Value)
   _G.Auto_Gun = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3044", function()
   while wait(Sec) do
     pcall(function()
     if _G.Auto_Gun then statsSetings("Gun",pSats) end
@@ -3052,7 +3695,7 @@ local StatsUpg = Tabs.Settings:AddToggle("StatsUpg", {Title = "Auto Blox Fruit",
 StatsUpg:OnChanged(function(Value)
   _G.Auto_DevilFruit = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3055", function()
   while wait(Sec) do
     pcall(function()
     if _G.Auto_DevilFruit then statsSetings("Devil",pSats) end
@@ -3063,7 +3706,7 @@ local StatsUpg = Tabs.Settings:AddToggle("StatsUpg", {Title = "Auto Defense", De
 StatsUpg:OnChanged(function(Value)
   _G.Auto_Defense = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3066", function()
   while wait(Sec) do
     pcall(function()
     if _G.Auto_Defense then statsSetings("Defense",pSats) end
@@ -3076,7 +3719,7 @@ local SuperHuman = Tabs.Melee:AddToggle("SuperHuman", {Title = "Auto Superhuman"
 SuperHuman:OnChanged(function(Value)
   _G.Auto_SuperHuman = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3079", function()
   while wait(Sec) do
     pcall(function()
       if _G.Auto_SuperHuman then
@@ -3107,7 +3750,7 @@ local DeathStep = Tabs.Melee:AddToggle("DeathStep", {Title = "Auto DeathStep", D
 DeathStep:OnChanged(function(Value)
   _G.AutoDeathStep = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3110", function()
   while wait(Sec) do
     if _G.AutoDeathStep then
       pcall(function()
@@ -3137,7 +3780,7 @@ local SharkManV2 = Tabs.Melee:AddToggle("SharkManV2", {Title = "Auto Sharkman Ka
 SharkManV2:OnChanged(function(Value)
   _G.Auto_SharkMan_Karate = Value
 end)
-spawn(function() 
+SafeTaskSpawn("L3140", function() 
   while wait(Sec) do
     if _G.Auto_SharkMan_Karate then
       pcall(function()
@@ -3170,7 +3813,7 @@ local ElectricClaw = Tabs.Melee:AddToggle("ElectricClaw", {Title = "Auto Electri
 ElectricClaw:OnChanged(function(Value)
   _G.Auto_Electric_Claw = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3173", function()
   while wait(Sec) do
     if _G.Auto_Electric_Claw then
       pcall(function()
@@ -3191,7 +3834,7 @@ local DragonTalon = Tabs.Melee:AddToggle("DragonTalon", {Title = "Auto DragonTal
 DragonTalon:OnChanged(function(Value)
   _G.AutoDragonTalon = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3194", function()
   while wait(Sec) do
     if _G.AutoDragonTalon then
       pcall(function()
@@ -3209,7 +3852,7 @@ local Godhuman = Tabs.Melee:AddToggle("Godhuman", {Title = "Auto Godhuman", Desc
 Godhuman:OnChanged(function(Value)
   _G.Auto_God_Human = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3212", function()
   while wait() do
     pcall(function()
       if _G.AutoGodHuman then
@@ -3256,7 +3899,7 @@ local SanguineArt = Tabs.Melee:AddToggle("SanguineArt", {Title = "Auto SanguineA
 SanguineArt:OnChanged(function(Value)
   _G.snaguine = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3259", function()
   while wait(Sec) do
     if _G.snaguine then
       pcall(function()
@@ -3303,7 +3946,7 @@ end)
 
 Tabs.Quests:AddSection("Tushita + Yama")
 local Process = Tabs.Quests:AddParagraph({Title = "Elites Process ",Content = ""})
-spawn(function()
+SafeTaskSpawn("L3306", function()
   while wait(Sec) do
     pcall(function()    
       Process:SetDesc("Elite Procress :  " ..replicated.Remotes.CommF_:InvokeServer("EliteHunter","Progress"))
@@ -3314,7 +3957,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Elite Quest", Description = 
 Q:OnChanged(function(Value)
   _G.FarmEliteHunt = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3317", function()
   while wait(Sec) do
     pcall(function()
 	  if _G.FarmEliteHunt then
@@ -3342,7 +3985,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Stop when got God's Chalice", Des
 Q:OnChanged(function(Value)
   _G.StopWhenChalice = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3345", function()
   while wait(.2) do
     if _G.StopWhenChalice and _G.FarmEliteHunt then
       pcall(function()
@@ -3357,7 +4000,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Tushita Sword", Description 
 Q:OnChanged(function(Value)
   _G.Auto_Tushita = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3360", function()
   while wait(Sec) do
     pcall(function()
       if _G.Auto_Tushita then
@@ -3393,7 +4036,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Yama Sword", Description = "
 Q:OnChanged(function(Value)
   _G.Auto_Yama = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3396", function()
   while wait(Sec) do
     pcall(function()
       if _G.Auto_Yama then
@@ -3417,7 +4060,7 @@ end)
 
 Tabs.Quests:AddSection("Cursed Dual Katana")
 local CheckCDK = Tabs.Quests:AddParagraph({Title = " Number Cursed dual katana quests ",Content = "Quest Numbers :"})
-spawn(function()  
+SafeTaskSpawn("L3420", function()  
   while wait(.2) do 
     if QuestYama_1 == true then 
 	 CheckCDK:SetDesc(" Quest Numbers : yama quest 1") 
@@ -3440,7 +4083,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Get CDK [ Last Quest ]", Des
 Q:OnChanged(function(Value)
   _G.CDK = Value
 end)
-spawn(function()    
+SafeTaskSpawn("L3443", function()    
   while wait(Sec) do
     pcall(function()
       if _G.CDK then
@@ -3466,7 +4109,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Yama CDK", Description = "",
 Q:OnChanged(function(Value)
   _G.CDK_YM = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3469", function()
   while wait() do
     pcall(function()
       if _G.CDK_YM then
@@ -3560,7 +4203,7 @@ spawn(function()
     end)
   end
 end)
-spawn(function()
+SafeTaskSpawn("L3563", function()
   while wait() do
     pcall(function()
       if _G.CDK_YM then
@@ -3601,7 +4244,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Tushita CDK", Description = 
 Q:OnChanged(function(Value)
   _G.CDK_TS = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3604", function()
   while wait() do
     pcall(function()
       if _G.CDK_TS then
@@ -3727,7 +4370,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Tween to Legendary Sword Dealer",
 Q:OnChanged(function(Value)
   _G.Tp_LgS = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3730", function()
   while wait(Sec) do
     if _G.Tp_LgS then
 	  pcall(function()
@@ -3744,7 +4387,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Pole V1", Description = "", 
 Q:OnChanged(function(Value)
   _G.AutoPole = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3747", function()
   while wait(Sec) do
     if _G.AutoPole then
       pcall(function()
@@ -3762,7 +4405,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Pole V2 [Patched]", Descript
 Q:OnChanged(function(Value)
   _G.AutoPoleV2 = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3765", function()
   while wait(Sec) do
     pcall(function()
       if _G.AutoPoleV2 then        
@@ -3795,7 +4438,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Law Sword", Description = ""
 Q:OnChanged(function(Value)
   _G.AutoLawKak = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3798", function()
   while wait(Sec) do
     if _G.AutoLawKak then
       pcall(function()
@@ -3821,7 +4464,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Saw Sword", Description = ""
 Q:OnChanged(function(Value)
   _G.AutoSaw = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3824", function()
   while wait(.2) do
     pcall(function()
       if _G.AutoSaw then
@@ -3837,7 +4480,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Saber Sword", Description = 
 Q:OnChanged(function(Value)
   _G.AutoSaber = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3840", function()
   while wait(.2) do
     pcall(function()
       if _G.AutoSaber and plr.Data.Level.Value >= 200 and not plr.Backpack:FindFirstChild("Saber") and not plr.Character:FindFirstChild("Saber") then
@@ -3917,7 +4560,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Cybrog", Description = "", D
 Q:OnChanged(function(Value)
   _G.AutoColShad = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3920", function()
   while wait(.2) do
     if _G.AutoColShad then
       pcall(function()
@@ -3933,7 +4576,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Usoap's Hat", Description = 
 Q:OnChanged(function(Value)
   _G.AutoGetUsoap = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3936", function()
   while task.wait(Sec) do
     pcall(function()
       if _G.AutoGetUsoap then
@@ -3952,7 +4595,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Bisento V2", Description = "
 Q:OnChanged(function(Value)
   _G.Greybeard = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3955", function()
   while wait(Sec) do
     if _G.Greybeard then
       pcall(function()
@@ -3973,7 +4616,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Warden Sword", Description =
 Q:OnChanged(function(Value)
   _G.WardenBoss = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3976", function()
   while wait(.1) do
     if _G.WardenBoss then
       pcall(function()
@@ -3989,7 +4632,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Marine Coat", Description = 
 Q:OnChanged(function(Value)
   _G.MarinesCoat = Value
 end)
-spawn(function()
+SafeTaskSpawn("L3992", function()
   while wait(.1) do
     if _G.MarinesCoat then
       pcall(function()
@@ -4005,7 +4648,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Swan Coat", Description = ""
 Q:OnChanged(function(Value)
   _G.SwanCoat = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4008", function()
   while wait(.1) do
     if _G.SwanCoat then
       pcall(function()
@@ -4023,7 +4666,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Rengoku Sword", Description 
 Q:OnChanged(function(Value)
   _G.IceBossRen = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4026", function()
   pcall(function()
     while wait(.1) do
       if _G.IceBossRen then
@@ -4039,7 +4682,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Key Rengoku", Description = 
 Q:OnChanged(function(Value)
   _G.KeysRen = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4042", function()
   while wait(.1) do
     pcall(function()
       if _G.KeysRen then
@@ -4060,7 +4703,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Dragon Trident", Description
 Q:OnChanged(function(Value)
   _G.AutoTridentW2 = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4063", function()
   while wait(.1) do
     pcall(function()
       if _G.AutoTridentW2 then
@@ -4076,7 +4719,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Long Sword", Description = "
 Q:OnChanged(function(Value)
   _G.LongsWord = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4079", function()
   while wait(.1) do
     pcall(function()
       if _G.LongsWord then
@@ -4092,7 +4735,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Black Spikey", Description =
 Q:OnChanged(function(Value)
   _G.BlackSpikey = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4095", function()
   while wait(.1) do
     if _G.BlackSpikey then
       pcall(function()
@@ -4108,7 +4751,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Dark Blade V3", Description 
 Q:OnChanged(function(Value)
   _G.DarkBladev3 = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4111", function()
   while wait(Sec) do
     pcall(function()
       if _G.DarkBladev3 and World2 then
@@ -4131,7 +4774,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Midnight Blade", Description
 Q:OnChanged(function(Value)
   _G.AutoEcBoss = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4134", function()
   while wait(Sec) do
     pcall(function()
       if _G.AutoEcBoss then
@@ -4153,7 +4796,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Darkbeard", Description = ""
 Q:OnChanged(function(Value)
   _G.Auto_Def_DarkCoat = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4156", function()
   while wait(.1) do
     if _G.Auto_Def_DarkCoat then
       pcall(function()
@@ -4173,7 +4816,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Unlocked DonSwan", Descripti
 Q:OnChanged(function(Value)
   _G.Auto_DonAcces = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4176", function()
   while wait(.1) do
     if _G.Auto_DonAcces then
       pcall(function()
@@ -4220,7 +4863,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Swan Glasses", Description =
 Q:OnChanged(function(Value)
   _G.Auto_SwanGG = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4223", function()
   while wait(.2) do
     if _G.Auto_SwanGG then
       pcall(function()
@@ -4238,7 +4881,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Bigmom", Description = "", D
 Q:OnChanged(function(Value)
   _G.AutoBigmom = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4241", function()
   while wait(Sec) do
     if _G.AutoBigmom then
       pcall(function()
@@ -4254,7 +4897,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Canvendish Sword", Descripti
 Q:OnChanged(function(Value)
   _G.Auto_Cavender = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4257", function()
   while wait(Sec) do
     pcall(function()
       if _G.Auto_Cavender then
@@ -4270,7 +4913,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Twin Hooks", Description = "
 Q:OnChanged(function(Value)
   _G.TwinHook = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4273", function()
   while wait(Sec) do
     pcall(function()
       if _G.TwinHook then
@@ -4288,7 +4931,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Serpent Bow", Description = 
 Q:OnChanged(function(Value)
   _G.AutoSerpentBow = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4291", function()
   while wait(Sec) do
     if _G.AutoSerpentBow then
       local v = GetConnectionEnemies("Hydra Leader")
@@ -4302,7 +4945,7 @@ local Q = Tabs.Quests:AddToggle("Q", {Title = "Auto Lei Accessory", Description 
 Q:OnChanged(function(Value)
   _G.AutoKilo = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4305", function()
   while wait(.2) do
     if _G.AutoKilo then
       pcall(function()
@@ -4319,7 +4962,7 @@ AutoValentineGacha:OnChanged(function(Value)
     _G.AutoValentineGacha = Value
 end)
 
-spawn(function()
+SafeTaskSpawn("L4322", function()
     local ReplicatedStorage = game:GetService("ReplicatedStorage")
     local Remotes = ReplicatedStorage:WaitForChild("Remotes")
     local CommF = Remotes:WaitForChild("CommF_")
@@ -4352,7 +4995,7 @@ end)
 Tabs.Mirage:AddSection("Mystic Island / Full Moon")
 FullMOOn = Tabs.Mirage:AddParagraph({Title = " FullMoon Status ",Content = ""})
 Ismirage = Tabs.Mirage:AddParagraph({Title = " Mirage Island Status ",Content = ""})
-spawn(function()
+SafeTaskSpawn("L4355", function()
   while wait(.2) do
     if workspace.Map:FindFirstChild("MysticIsland") or workspace._WorldOrigin.Locations:FindFirstChild("Mirage Island") then
       Ismirage:SetDesc(" Mirage Island : True")
@@ -4361,7 +5004,7 @@ spawn(function()
     end
   end
 end)
-spawn(function()
+SafeTaskSpawn("L4364", function()
   while wait(.2) do
     pcall(function()
       moon8 = "http://www.roblox.com/asset/?id=9709150401"
@@ -4397,7 +5040,7 @@ local Q = Tabs.Mirage:AddToggle("Q", {Title = "Auto Find Mirage Island", Descrip
 Q:OnChanged(function(Value)
   _G.FindMirage = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4400", function()
   while wait() do
     if _G.FindMirage then 
       pcall(function()
@@ -4433,7 +5076,7 @@ local Q = Tabs.Mirage:AddToggle("Q", {Title = "Auto Tween To Highest Point", Des
 Q:OnChanged(function(Value)
   _G.HighestMirage = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4436", function()
   while wait(Sec) do
     if _G.HighestMirage then 
       pcall(function()
@@ -4446,7 +5089,7 @@ local Q = Tabs.Mirage:AddToggle("Q", {Title = "Auto Collect Gear", Description =
 Q:OnChanged(function(Value)
   _G.TPGEAR = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4449", function()
   pcall(function()
     while wait(0.1) do
       if _G.TPGEAR then
@@ -4463,7 +5106,7 @@ local Q = Tabs.Mirage:AddToggle("Q", {Title = "Change Transparency can see", Des
 Q:OnChanged(function(Value)
   _G.can = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4466", function()
   pcall(function()
     while wait(Sec) do
       if _G.can then
@@ -4484,7 +5127,7 @@ local Q = Tabs.Mirage:AddToggle("Q", {Title = "Auto Tween Advanced Fruit Dealer"
 Q:OnChanged(function(Value)
   _G.Addealer = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4487", function()
   while wait() do
     if _G.Addealer then
 	  pcall(function()
@@ -4499,7 +5142,7 @@ local Q = Tabs.Mirage:AddToggle("Q", {Title = "Auto Collect Mirage Chest", Descr
 Q:OnChanged(function(Value)
   _G.FarmChestM = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4502", function()
   while wait(.2) do
     if _G.FarmChestM then
       pcall(function()
@@ -4531,7 +5174,7 @@ end)
 
 Tabs.Mirage:AddSection("Skull Guitars / Misc")
 local CheckSoul = Tabs.Mirage:AddParagraph({Title = " Skull Guitar Quests ",Content = ""})
-spawn(function()
+SafeTaskSpawn("L4534", function()
   while wait(.2) do
     pcall(function()
       if Quest1 == true then CheckSoul:SetDesc(" Quest Number : Quest1")
@@ -4548,7 +5191,7 @@ local Q = Tabs.Mirage:AddToggle("Q", {Title = "Auto Skull Guitar", Description =
 Q:OnChanged(function(Value)
   _G.Auto_Soul_Guitar = Value
 end)
-task.spawn(function()
+SafeTaskSpawn("L4551", function()
   while wait() do
     if _G.Auto_Soul_Guitar then 
       pcall(function() 
@@ -4608,7 +5251,7 @@ GetFirePlacard = function(Number,Side)
     SafeFireClickDetector(workspace.Map["Haunted Castle"]["Placard"..Number][Side].ClickDetector)
   end
 end
-spawn(function()
+SafeTaskSpawn("L4611", function()
   repeat task.wait() until _G.Auto_Soul_Guitar
   while wait(Sec) do
     pcall(function()
@@ -4722,7 +5365,7 @@ local Q = Tabs.Mirage:AddToggle("Q", {Title = "Auto Farm Material Skull Guitar",
 Q:OnChanged(function(Value)
   _G.AutoMatSoul = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4725", function()
   while wait(Sec) do
     pcall(function()
       if _G.AutoMatSoul and GetWP("Skull Guitar") == false then
@@ -4778,7 +5421,7 @@ function MoveCamtoMoon()
 workspace.CurrentCamera.CFrame = CFrame.new(workspace.CurrentCamera.CFrame.Position,Lighting:GetMoonDirection() + workspace.CurrentCamera.CFrame.Position)
 plr.Character.HumanoidRootPart.CFrame = CFrame.new(plr.Character.HumanoidRootPart.Position,Lighting:GetMoonDirection() + plr.Character.HumanoidRootPart.CFrame.Position)
 end
-task.spawn(function()
+SafeTaskSpawn("L4781", function()
   while task.wait() do
     if LookM then
       MoveCamtoMoon()
@@ -4790,7 +5433,7 @@ end)
 
 Tabs.Mirage:AddSection("Trials Quests / Misc V4")
 local CheckTier = Tabs.Mirage:AddParagraph({Title = " Tiers V4 Status ",Content = ""})
-spawn(function()
+SafeTaskSpawn("L4793", function()
   pcall(function()
     while wait(.2) do
       CheckTier:SetDesc(" Tiers - V4  :" .." "..plr.Data.Race.C.Value)
@@ -4801,7 +5444,7 @@ local Q = Tabs.Mirage:AddToggle("Q", {Title = "Auto Pull Lever", Description = "
 Q:OnChanged(function(Value)
   _G.Lver = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4804", function()
   while wait(Sec) do
     if _G.Lver then
       pcall(function()
@@ -4816,7 +5459,7 @@ local Q = Tabs.Mirage:AddToggle("Q", {Title = "Auto Train V4", Description = "tu
 Q:OnChanged(function(Value)
   _G.AcientOne = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4819", function()
   while wait(Sec) do
     pcall(function()
       if _G.AcientOne then
@@ -4853,7 +5496,7 @@ local Q = Tabs.Mirage:AddToggle("Q", {Title = "Auto Teleport to Race Doors", Des
 Q:OnChanged(function(Value)
   _G.TPDoor = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4856", function()
   while wait(Sec) do
     pcall(function()
       if _G.TPDoor then
@@ -4889,7 +5532,7 @@ GetSeaBeastTrial = function()
     end
   end
 end
-spawn(function()
+SafeTaskSpawn("L4892", function()
   while wait(Sec) do
     pcall(function()
       if _G.Complete_Trials then
@@ -4900,14 +5543,14 @@ spawn(function()
     end)
   end
 end)
-spawn(function()
+SafeTaskSpawn("L4903", function()
   while wait(Sec) do
     pcall(function() 
       if _G.Complete_Trials then
 	    if tostring(plr.Data.Race.Value) == "Fishman" then
 	      if GetSeaBeastTrial() then            
             repeat task.wait()
-              spawn(function()_tp(CFrame.new(GetSeaBeastTrial().HumanoidRootPart.Position.X,game:GetService("Workspace").Map["WaterBase-Plane"].Position.Y + 300,GetSeaBeastTrial().HumanoidRootPart.Position.Z))end)
+              SafeTaskSpawn("L4910", function()_tp(CFrame.new(GetSeaBeastTrial().HumanoidRootPart.Position.X,game:GetService("Workspace").Map["WaterBase-Plane"].Position.Y + 300,GetSeaBeastTrial().HumanoidRootPart.Position.Z))end)
 		      MousePos = GetSeaBeastTrial().HumanoidRootPart.Position
               Useskills("Melee","Z")
 	          Useskills("Melee","X")
@@ -4929,7 +5572,7 @@ spawn(function()
     end)
   end
 end)
-spawn(function()
+SafeTaskSpawn("L4932", function()
   while wait(Sec) do
     pcall(function()
       if _G.Complete_Trials then
@@ -4940,7 +5583,7 @@ spawn(function()
     end)
   end
 end)
-spawn(function()
+SafeTaskSpawn("L4943", function()
   while wait(Sec) do
     pcall(function()
       if _G.Complete_Trials then
@@ -4951,7 +5594,7 @@ spawn(function()
     end)
   end
 end)
-spawn(function()
+SafeTaskSpawn("L4954", function()
   while wait(.1) do   
     pcall(function()
       if _G.Complete_Trials then
@@ -4968,7 +5611,7 @@ local Q = Tabs.Mirage:AddToggle("Q", {Title = "Auto Kill Player After Trial", De
 Q:OnChanged(function(Value)
   _G.Defeating = Value
 end)
-spawn(function()
+SafeTaskSpawn("L4971", function()
   while task.wait(Sec) do
     pcall(function()
       if _G.Defeating then
@@ -4990,7 +5633,7 @@ DojoQ:OnChanged(function(Value)
   _G.Dojoo = Value
 end)
 function printBeltName(data) if type(data) == "table" and data.Quest["BeltName"] then return data.Quest["BeltName"] end end
-spawn(function()
+SafeTaskSpawn("L4993", function()
   while wait(Sec) do
     if _G.Dojoo then
       pcall(function()
@@ -5078,7 +5721,7 @@ end)
 checkQuesta=function()local a={[1]={["Context"]="Check"}}local b=nil;pcall(function()local c={[1]={["Context"]="RequestQuest"}}game:GetService("ReplicatedStorage"):WaitForChild("Modules"):WaitForChild("Net"):WaitForChild("RF/DragonHunter"):InvokeServer(unpack(c))end)local d,e=pcall(function()b=game:GetService("ReplicatedStorage"):WaitForChild("Modules"):WaitForChild("Net"):WaitForChild("RF/DragonHunter"):InvokeServer(unpack(a))end)local f=false;local g;local h;local i;if b then if b.Text then f=true;local j=b.Text;if string.find(tostring(j),"Defeat")then i=1;g=string.sub(tostring(j),8,9)g=tonumber(g)local k={"Hydra Enforcer","Venomous Assailant"}for l,m in pairs(k)do if string.find(j,m)then h=m;break end end elseif string.find(tostring(j),"Destroy")then g=10;i=2;h=nil end end end;return f,h,g,i end
 BackTODoJo=function()for a,b in pairs(game:GetService("Players").LocalPlayer.PlayerGui.Notifications:GetChildren())do if b.Name=="NotificationTemplate"then if string.find(b.Text,"Head back to the Dojo to complete more tasks")then return true end end end;return false end
 DragonMobClear=function(a,b,c)if workspace.Enemies:FindFirstChild(b)then for d,e in pairs(workspace.Enemies:GetChildren())do if e.Name==b and Attack.Alive(e)then if a then Attack.Kill(e,a)end end end else _tp(c)end end
-spawn(function()
+SafeTaskSpawn("L5081", function()
   while wait() do 
     if _G.FarmBlazeEM then
       pcall(function()              
@@ -5093,7 +5736,7 @@ spawn(function()
           elseif x == 2 then
             if workspace.Map.Waterfall.IslandModel:FindFirstChild("Meshes/bambootree", true) then
               repeat wait()                
-                spawn(function() _tp(workspace.Map.Waterfall.IslandModel:FindFirstChild("Meshes/bambootree", true).CFrame * CFrame.new(4,0,0)) end)
+                SafeTaskSpawn("L5096", function() _tp(workspace.Map.Waterfall.IslandModel:FindFirstChild("Meshes/bambootree", true).CFrame * CFrame.new(4,0,0)) end)
                 if (workspace.Map.Waterfall.IslandModel:FindFirstChild("Meshes/bambootree", true).Position - Root.Position).Magnitude <= 200 then
                 MousePos = workspace.Map.Waterfall.IslandModel:FindFirstChild("Meshes/bambootree", true).Position
                 Useskills("Melee","Z")
@@ -5121,7 +5764,7 @@ spawn(function()
     end
   end
 end)
-spawn(function()
+SafeTaskSpawn("L5124", function()
   while wait(.1) do 
     if _G.FarmBlazeEM then
       pcall(function()              
@@ -5142,7 +5785,7 @@ Toggle = Tabs.Drago:AddToggle("Toggle", {Title = "Tween To Upgrade Droco Trial",
 Toggle:OnChanged(function(Value)
   _G.UPGDrago = Value
 end)
-spawn(function()
+SafeTaskSpawn("L5145", function()
   while wait(Sec) do
     pcall(function()
       if _G.UPGDrago then     
@@ -5165,7 +5808,7 @@ Toggle = Tabs.Drago:AddToggle("Toggle", {Title = "Auto Drago (V1)", Description 
 Toggle:OnChanged(function(Value)
   _G.DragoV1 = Value
 end)
-spawn(function()
+SafeTaskSpawn("L5168", function()
   while wait(Sec) do
     pcall(function()
       if _G.DragoV1 then     
@@ -5187,7 +5830,7 @@ local fireflower = Tabs.Drago:AddToggle("fireflower", {Title = "Auto Drago (V2)"
 fireflower:OnChanged(function(Value)
   _G.AutoFireFlowers = Value
 end)
-spawn(function()
+SafeTaskSpawn("L5190", function()
   while wait(Sec) do
     if _G.AutoFireFlowers then
       local FireFlower = workspace:FindFirstChild("FireFlowers")
@@ -5216,7 +5859,7 @@ Toggle = Tabs.Drago:AddToggle("Toggle", {Title = "Auto Drago (V3)", Description 
 Toggle:OnChanged(function(Value)
   _G.DragoV3 = Value
 end)
-spawn(function()
+SafeTaskSpawn("L5219", function()
   while wait(Sec) do
     pcall(function()
       if _G.DragoV3 then     
@@ -5236,7 +5879,7 @@ Toggle = Tabs.Drago:AddToggle("Toggle", {Title = "Auto Relic Drago Trial", Descr
 Toggle:OnChanged(function(Value)
   _G.Relic123 = Value
 end)
-spawn(function()
+SafeTaskSpawn("L5239", function()
   while wait(Sec) do
     if _G.Relic123 then
       pcall(function()
@@ -5263,7 +5906,7 @@ Toggle = Tabs.Drago:AddToggle("Toggle", {Title = "Auto Train Drago v4", Descript
 Toggle:OnChanged(function(Value)
   _G.TrainDrago = Value
 end)
-spawn(function()
+SafeTaskSpawn("L5266", function()
   while wait(Sec) do
     pcall(function()
       if _G.TrainDrago then
@@ -5288,7 +5931,7 @@ local dragoTpVolcano = Tabs.Drago:AddToggle("dragoTpVolcano", {Title = "Tween to
 dragoTpVolcano:OnChanged(function(Value)
   _G.TpDrago_Prehis = Value
 end)
-spawn(function()
+SafeTaskSpawn("L5291", function()
   while wait(Sec) do
     if _G.TpDrago_Prehis then
       local v748 = workspace.Map.PrehistoricIsland:FindFirstChild("TrialTeleport");
@@ -5300,7 +5943,7 @@ local bdrago = Tabs.Drago:AddToggle("bdrago", {Title = "Swap Drago Race", Descri
 bdrago:OnChanged(function(Value)
   _G.BuyDrago = Value
 end)
-spawn(function()
+SafeTaskSpawn("L5303", function()
   while wait(Sec) do
     if _G.BuyDrago then
       pcall(function()
@@ -5319,7 +5962,7 @@ local UpTalon = Tabs.Drago:AddToggle("UpTalon", {Title = "Upgrade Dragon Talon W
 UpTalon:OnChanged(function(Value)
   _G.DT_Uzoth = Value
 end)
-spawn(function()
+SafeTaskSpawn("L5322", function()
   while wait(Sec) do
     if _G.DT_Uzoth then
       local Uz_POS = CFrame.new(5661.89014, 1211.31909, 864.836731, 0.811413169, -1.36805838e-08, -0.584473014, 4.75227395e-08, 1, 4.25682458e-08, 0.584473014, -6.23161966e-08, 0.811413169)
@@ -5341,7 +5984,7 @@ Tabs.Prehistoric:AddButton({Title = "Craft Volcanic Magnet", Description = "",
 Callback = function()
   replicated.Remotes.CommF_:InvokeServer("CraftItem","Craft","Volcanic Magnet")
 end})
-spawn(function()
+SafeTaskSpawn("L5344", function()
   while wait(Sec) do
     pcall(function()
       if _G.CraftVM then     
@@ -5363,7 +6006,7 @@ spawn(function()
 end)
 Tabs.Prehistoric:AddSection("Prehistoric Island")
 local Check_Volcano = Tabs.Prehistoric:AddParagraph({Title = " Prehistoric Island Status ",Content = ""})
-spawn(function()
+SafeTaskSpawn("L5366", function()
   while wait(.2) do
     if workspace.Map:FindFirstChild("PrehistoricIsland") or workspace._WorldOrigin.Locations:FindFirstChild("Prehistoric Island") then
       Check_Volcano:SetDesc(" Prehistoric Island : True")
@@ -5377,7 +6020,7 @@ Vocan:OnChanged(function(Value)
   _G.Prehis_Find = Value
 end)
 local targetDestination = nil
-spawn(function()
+SafeTaskSpawn("L5380", function()
   while wait() do
     if _G.Prehis_Find then 
       pcall(function()
@@ -5422,7 +6065,7 @@ local Vocan = Tabs.Prehistoric:AddToggle("Vocan", {Title = "Auto Patch Prehistor
 Vocan:OnChanged(function(Value)
   _G.Prehis_Skills = Value
 end)
-spawn(function()
+SafeTaskSpawn("L5425", function()
   while wait() do
     if _G.Prehis_Skills then
       local prehistoricIsland = game.Workspace.Map:FindFirstChild("PrehistoricIsland")
@@ -5448,7 +6091,7 @@ spawn(function()
     end
   end
 end)
-spawn(function()
+SafeTaskSpawn("L5451", function()
   while wait() do
     pcall(function()
       if _G.Prehis_Skills then
@@ -5482,7 +6125,7 @@ local Vocan = Tabs.Prehistoric:AddToggle("Vocan", {Title = "Auto Collect Dino Bo
 Vocan:OnChanged(function(Value)
   _G.Prehis_DB = Value
 end)
-spawn(function()
+SafeTaskSpawn("L5485", function()
   while wait(Sec) do
     pcall(function()
       if _G.Prehis_DB then
@@ -5497,13 +6140,41 @@ spawn(function()
 end)
 local Vocan = Tabs.Prehistoric:AddToggle("Vocan", {Title = "Auto Collect Dragon Eggs", Description = "", Default = false})
 Vocan:OnChanged(function(Value)
+  if Value then
+    local ready = DragonEggRemoteReady(false)
+    if not ready then
+      _G.Prehis_DE = false
+      if Vocan.Value == true then
+        -- Evita recursão: atualizamos apenas o estado visual se a implementação permitir.
+        Vocan.Value = false
+      end
+      return
+    end
+  end
   _G.Prehis_DE = Value
 end)
-spawn(function()
+SafeTaskSpawn("L5502", function()
   while wait(Sec) do
     pcall(function()
       if _G.Prehis_DE then
-      if workspace.Map.PrehistoricIsland.Core.SpawnedDragonEggs:FindFirstChild("DragonEgg") then _tp(workspace.Map.PrehistoricIsland.Core.SpawnedDragonEggs:FindFirstChild("DragonEgg").Molten.CFrame) SafeFireProximityPrompt(workspace.Map.PrehistoricIsland.Core.SpawnedDragonEggs.DragonEgg.Molten.ProximityPrompt, 30) end        
+        local ready = DragonEggRemoteReady(true)
+        if not ready then
+          _G.Prehis_DE = false
+          WarnOnce("PrehisDEStopped", "Auto Collect Dragon Eggs foi parado porque o RemoteEvent real ainda não existe neste cliente/servidor.")
+          return
+        end
+
+        local map = workspace:FindFirstChild("Map")
+        local island = map and map:FindFirstChild("PrehistoricIsland")
+        local core = island and island:FindFirstChild("Core")
+        local eggs = core and core:FindFirstChild("SpawnedDragonEggs")
+        local egg = eggs and eggs:FindFirstChild("DragonEgg")
+        local molten = egg and egg:FindFirstChild("Molten")
+        local prompt = molten and molten:FindFirstChildOfClass("ProximityPrompt")
+        if molten then
+          _tp(molten.CFrame)
+          if prompt then SafeFireProximityPrompt(prompt, 30) end
+        end
       end
     end)
   end
@@ -5512,7 +6183,7 @@ Toggle = Tabs.Prehistoric:AddToggle("Toggle", {Title = "Auto Reset When Complete
 Toggle:OnChanged(function(Value)
   _G.ResetPH = Value
 end)
-spawn(function()
+SafeTaskSpawn("L5515", function()
   while wait(Sec) do
     pcall(function()
       if _G.ResetPH then
@@ -5535,7 +6206,7 @@ Tabs.SeaEvent:AddSection("Sea Event / Setting Sail")
 local ListSeaBoat={"Guardian","PirateGrandBrigade","MarineGrandBrigade","PirateBrigade","MarineBrigade","PirateSloop","MarineSloop","Beast Hunter"}
 local ListSeaZone={"Lv 1","Lv 2","Lv 3","Lv 4","Lv 5","Lv 6","Lv Infinite"}
 local SPYING = Tabs.SeaEvent:AddParagraph({Title = " Spy Status ",Content = ""})
-spawn(function()
+SafeTaskSpawn("L5538", function()
   while wait(.2) do
     pcall(function()
       local spycheck = string.match(replicated.Remotes.CommF_:InvokeServer("InfoLeviathan","1"),"%d+")
@@ -5552,7 +6223,7 @@ Callback = function()
   replicated:WaitForChild("Remotes"):WaitForChild("CommF_"):InvokeServer("InfoLeviathan","2")
 end})
 local FloD = Tabs.SeaEvent:AddParagraph({Title = " FlozenDimension Status ",Content = ""})
-spawn(function()
+SafeTaskSpawn("L5555", function()
   pcall(function()
     while wait(.2) do
       if workspace._WorldOrigin.Locations:FindFirstChild('Frozen Dimension') then
@@ -5567,7 +6238,7 @@ local Q = Tabs.SeaEvent:AddToggle("Q", {Title = "Auto Teleport Frozen Dimension"
 Q:OnChanged(function(Value)
   _G.FrozenTP = Value
 end)
-spawn(function()
+SafeTaskSpawn("L5570", function()
   while wait(.1) do
     if _G.FrozenTP then
       pcall(function()
@@ -5580,7 +6251,7 @@ local Q = Tabs.SeaEvent:AddToggle("Q", {Title = "Auto Drive To Hydra Island", De
 Q:OnChanged(function(Value)
   _G.SailBoat_Hydra = Value
 end)
-spawn(function()
+SafeTaskSpawn("L5583", function()
   while wait() do
     if _G.SailBoat_Hydra then 
       pcall(function()        
@@ -5623,7 +6294,7 @@ local Q = Tabs.SeaEvent:AddToggle("Q", {Title = "Auto Sail Boat", Description = 
 Q:OnChanged(function(Value)
   _G.SailBoats = Value
 end)
-spawn(function()
+SafeTaskSpawn("L5626", function()
   while wait() do
     if _G.SailBoats then 
       pcall(function()        
@@ -5658,7 +6329,7 @@ spawn(function()
     end
   end
 end)
-spawn(function()while wait(Sec)do pcall(function()for a,b in pairs(workspace.Boats:GetChildren())do for c,d in pairs(workspace.Boats[b.Name]:GetDescendants())do if d:IsA("BasePart")then if _G.SailBoats or _G.Prehis_Find or _G.FindMirage or _G.SailBoat_Hydra or _G.AutofindKitIs then d.CanCollide=false else d.CanCollide=true end end end end end)end end)
+SafeTaskSpawn("L5661", function()while wait(Sec)do pcall(function()for a,b in pairs(workspace.Boats:GetChildren())do for c,d in pairs(workspace.Boats[b.Name]:GetDescendants())do if d:IsA("BasePart")then if _G.SailBoats or _G.Prehis_Find or _G.FindMirage or _G.SailBoat_Hydra or _G.AutofindKitIs then d.CanCollide=false else d.CanCollide=true end end end end end)end end)
 Tabs.SeaEvent:AddSection("Entity Sea Event")
 Q = Tabs.SeaEvent:AddToggle("Q", {Title = "Auto Shark", Description = "", Default = false})
 Q:OnChanged(function(Value)
@@ -5696,7 +6367,7 @@ Q = Tabs.SeaEvent:AddToggle("Q", {Title = "Auto Attack Leviathan", Description =
 Q:OnChanged(function(Value)
   _G.Leviathan1 = Value
 end)
-spawn(function()
+SafeTaskSpawn("L5699", function()
   while wait() do
     pcall(function()	
       if _G.Shark then local a={"Shark"}if CheckShark()then for b,c in pairs(workspace.Enemies:GetChildren())do if table.find(a,c.Name)then if Attack.Alive(c)then repeat task.wait()Attack.Kill(c,_G.Shark)until _G.Shark==false or not c.Parent or c.Humanoid.Health<=0 end end end end end
@@ -5704,17 +6375,17 @@ spawn(function()
       if _G.Piranha then local a={"Piranha"}if CheckPiranha()then for b,c in pairs(workspace.Enemies:GetChildren())do if table.find(a,c.Name)then if Attack.Alive(c)then repeat task.wait()Attack.Kill(c,_G.Piranha)until _G.Piranha==false or not c.Parent or c.Humanoid.Health<=0 end end end end end
       if _G.MobCrew then local a={"Fish Crew Member"}if CheckFishCrew()then for b,c in pairs(workspace.Enemies:GetChildren())do if table.find(a,c.Name)then if Attack.Alive(c)then repeat task.wait()Attack.Kill(c,_G.MobCrew)until _G.MobCrew==false or not c.Parent or c.Humanoid.Health<=0 end end end end end                 
       if _G.HCM then local a={"Haunted Crew Member"}if CheckHauntedCrew()then for b,c in pairs(workspace.Enemies:GetChildren())do if table.find(a,c.Name)then if Attack.Alive(c)then repeat task.wait()Attack.Kill(c,_G.HCM)until _G.HCM==false or not c.Parent or c.Humanoid.Health<=0 end end end end end
-      if _G.SeaBeast1 then if workspace.SeaBeasts:FindFirstChild("SeaBeast1")then for a,b in pairs(workspace.SeaBeasts:GetChildren())do if b:FindFirstChild("HumanoidRootPart")and b:FindFirstChild("Health")and b.Health.Value>0 then repeat task.wait()spawn(function()_tp(CFrame.new(b.HumanoidRootPart.Position.X,game:GetService("Workspace").Map["WaterBase-Plane"].Position.Y+200,b.HumanoidRootPart.Position.Z))end)if plr:DistanceFromCharacter(b.HumanoidRootPart.CFrame.Position)<=500 then AitSeaSkill_Custom=b.HumanoidRootPart.CFrame;MousePos=AitSeaSkill_Custom.Position;if CheckF()then weaponSc("Blox Fruit")Useskills("Blox Fruit","Z")Useskills("Blox Fruit","X")Useskills("Blox Fruit","C")else Useskills("Melee","Z")Useskills("Melee","X")Useskills("Melee","C")wait(.1)Useskills("Sword","Z")Useskills("Sword","X")wait(.1)Useskills("Blox Fruit","Z")Useskills("Blox Fruit","X")Useskills("Blox Fruit","C")wait(.1)Useskills("Gun","Z")Useskills("Gun","X")end end until _G.SeaBeast1==false or not b:FindFirstChild("HumanoidRootPart")or not b.Parent or b.Health.Value<=0 end end end end
-      if _G.Leviathan1 then if workspace.SeaBeasts:FindFirstChild("Leviathan")then for a,b in pairs(workspace.SeaBeasts:GetChildren())do if b:FindFirstChild("HumanoidRootPart")and b:FindFirstChild("Leviathan Segment")and b:FindFirstChild("Health")and b.Health.Value>0 then repeat task.wait()spawn(function()_tp(CFrame.new(b.HumanoidRootPart.Position.X,game:GetService("Workspace").Map["WaterBase-Plane"].Position.Y+200,b.HumanoidRootPart.Position.Z))end)if plr:DistanceFromCharacter(b.HumanoidRootPart.CFrame.Position)<=500 then MousePos=b:FindFirstChild("Leviathan Segment").Position;if CheckF()then weaponSc("Blox Fruit")Useskills("Blox Fruit","Z")Useskills("Blox Fruit","X")Useskills("Blox Fruit","C")else Useskills("Melee","Z")Useskills("Melee","X")Useskills("Melee","C")wait(.1)Useskills("Sword","Z")Useskills("Sword","X")wait(.1)Useskills("Blox Fruit","Z")Useskills("Blox Fruit","X")Useskills("Blox Fruit","C")wait(.1)Useskills("Gun","Z")Useskills("Gun","X")end end until _G.Leviathan1==false or not b:FindFirstChild("HumanoidRootPart")or not b.Parent or b.Health.Value<=0 end end end end
-      if _G.FishBoat then if CheckEnemiesBoat()then for a,b in pairs(workspace.Enemies:GetChildren())do if b:FindFirstChild("Health")and b.Health.Value>0 and b:FindFirstChild("VehicleSeat")then repeat task.wait()spawn(function()if b.Name=="FishBoat"then _tp(b.Engine.CFrame*CFrame.new(0,-50,-25))end end)if plr:DistanceFromCharacter(b.Engine.CFrame.Position)<=150 then AitSeaSkill_Custom=b.Engine.CFrame;MousePos=AitSeaSkill_Custom.Position;if CheckF()then weaponSc("Blox Fruit")Useskills("Blox Fruit","Z")Useskills("Blox Fruit","X")Useskills("Blox Fruit","C")else Useskills("Melee","Z")Useskills("Melee","X")Useskills("Melee","C")wait(.1)Useskills("Sword","Z")Useskills("Sword","X")wait(.1)Useskills("Blox Fruit","Z")Useskills("Blox Fruit","X")Useskills("Blox Fruit","C")wait(.1)Useskills("Gun","Z")Useskills("Gun","X")end end until _G.FishBoat==false or not b:FindFirstChild("VehicleSeat")or b.Health.Value<=0 end end end end
-      if _G.PGB then if CheckPirateGrandBrigade()then for a,b in pairs(workspace.Enemies:GetChildren())do if b:FindFirstChild("Health")and b.Health.Value>0 and b:FindFirstChild("VehicleSeat")then repeat task.wait()spawn(function()if b.Name=="PirateBrigade"then _tp(b.Engine.CFrame*CFrame.new(0,-30,-10))elseif b.Name=="PirateGrandBrigade"then _tp(b.Engine.CFrame*CFrame.new(0,-50,-50))end end)if plr:DistanceFromCharacter(b.Engine.CFrame.Position)<=150 then AitSeaSkill_Custom=b.Engine.CFrame;MousePos=AitSeaSkill_Custom.Position;if CheckF()then weaponSc("Blox Fruit")Useskills("Blox Fruit","Z")Useskills("Blox Fruit","X")Useskills("Blox Fruit","C")else Useskills("Melee","Z")Useskills("Melee","X")Useskills("Melee","C")wait(.1)Useskills("Sword","Z")Useskills("Sword","X")wait(.1)Useskills("Blox Fruit","Z")Useskills("Blox Fruit","X")Useskills("Blox Fruit","C")wait(.1)Useskills("Gun","Z")Useskills("Gun","X")end end until _G.PGB==false or not b:FindFirstChild("VehicleSeat")or b.Health.Value<=0 end end end end
+      if _G.SeaBeast1 then if workspace.SeaBeasts:FindFirstChild("SeaBeast1")then for a,b in pairs(workspace.SeaBeasts:GetChildren())do if b:FindFirstChild("HumanoidRootPart")and b:FindFirstChild("Health")and b.Health.Value>0 then repeat task.wait()SafeTaskSpawn("L5707", function()_tp(CFrame.new(b.HumanoidRootPart.Position.X,game:GetService("Workspace").Map["WaterBase-Plane"].Position.Y+200,b.HumanoidRootPart.Position.Z))end)if plr:DistanceFromCharacter(b.HumanoidRootPart.CFrame.Position)<=500 then AitSeaSkill_Custom=b.HumanoidRootPart.CFrame;MousePos=AitSeaSkill_Custom.Position;if CheckF()then weaponSc("Blox Fruit")Useskills("Blox Fruit","Z")Useskills("Blox Fruit","X")Useskills("Blox Fruit","C")else Useskills("Melee","Z")Useskills("Melee","X")Useskills("Melee","C")wait(.1)Useskills("Sword","Z")Useskills("Sword","X")wait(.1)Useskills("Blox Fruit","Z")Useskills("Blox Fruit","X")Useskills("Blox Fruit","C")wait(.1)Useskills("Gun","Z")Useskills("Gun","X")end end until _G.SeaBeast1==false or not b:FindFirstChild("HumanoidRootPart")or not b.Parent or b.Health.Value<=0 end end end end
+      if _G.Leviathan1 then if workspace.SeaBeasts:FindFirstChild("Leviathan")then for a,b in pairs(workspace.SeaBeasts:GetChildren())do if b:FindFirstChild("HumanoidRootPart")and b:FindFirstChild("Leviathan Segment")and b:FindFirstChild("Health")and b.Health.Value>0 then repeat task.wait()SafeTaskSpawn("L5708", function()_tp(CFrame.new(b.HumanoidRootPart.Position.X,game:GetService("Workspace").Map["WaterBase-Plane"].Position.Y+200,b.HumanoidRootPart.Position.Z))end)if plr:DistanceFromCharacter(b.HumanoidRootPart.CFrame.Position)<=500 then MousePos=b:FindFirstChild("Leviathan Segment").Position;if CheckF()then weaponSc("Blox Fruit")Useskills("Blox Fruit","Z")Useskills("Blox Fruit","X")Useskills("Blox Fruit","C")else Useskills("Melee","Z")Useskills("Melee","X")Useskills("Melee","C")wait(.1)Useskills("Sword","Z")Useskills("Sword","X")wait(.1)Useskills("Blox Fruit","Z")Useskills("Blox Fruit","X")Useskills("Blox Fruit","C")wait(.1)Useskills("Gun","Z")Useskills("Gun","X")end end until _G.Leviathan1==false or not b:FindFirstChild("HumanoidRootPart")or not b.Parent or b.Health.Value<=0 end end end end
+      if _G.FishBoat then if CheckEnemiesBoat()then for a,b in pairs(workspace.Enemies:GetChildren())do if b:FindFirstChild("Health")and b.Health.Value>0 and b:FindFirstChild("VehicleSeat")then repeat task.wait()SafeTaskSpawn("L5709", function()if b.Name=="FishBoat"then _tp(b.Engine.CFrame*CFrame.new(0,-50,-25))end end)if plr:DistanceFromCharacter(b.Engine.CFrame.Position)<=150 then AitSeaSkill_Custom=b.Engine.CFrame;MousePos=AitSeaSkill_Custom.Position;if CheckF()then weaponSc("Blox Fruit")Useskills("Blox Fruit","Z")Useskills("Blox Fruit","X")Useskills("Blox Fruit","C")else Useskills("Melee","Z")Useskills("Melee","X")Useskills("Melee","C")wait(.1)Useskills("Sword","Z")Useskills("Sword","X")wait(.1)Useskills("Blox Fruit","Z")Useskills("Blox Fruit","X")Useskills("Blox Fruit","C")wait(.1)Useskills("Gun","Z")Useskills("Gun","X")end end until _G.FishBoat==false or not b:FindFirstChild("VehicleSeat")or b.Health.Value<=0 end end end end
+      if _G.PGB then if CheckPirateGrandBrigade()then for a,b in pairs(workspace.Enemies:GetChildren())do if b:FindFirstChild("Health")and b.Health.Value>0 and b:FindFirstChild("VehicleSeat")then repeat task.wait()SafeTaskSpawn("L5710", function()if b.Name=="PirateBrigade"then _tp(b.Engine.CFrame*CFrame.new(0,-30,-10))elseif b.Name=="PirateGrandBrigade"then _tp(b.Engine.CFrame*CFrame.new(0,-50,-50))end end)if plr:DistanceFromCharacter(b.Engine.CFrame.Position)<=150 then AitSeaSkill_Custom=b.Engine.CFrame;MousePos=AitSeaSkill_Custom.Position;if CheckF()then weaponSc("Blox Fruit")Useskills("Blox Fruit","Z")Useskills("Blox Fruit","X")Useskills("Blox Fruit","C")else Useskills("Melee","Z")Useskills("Melee","X")Useskills("Melee","C")wait(.1)Useskills("Sword","Z")Useskills("Sword","X")wait(.1)Useskills("Blox Fruit","Z")Useskills("Blox Fruit","X")Useskills("Blox Fruit","C")wait(.1)Useskills("Gun","Z")Useskills("Gun","X")end end until _G.PGB==false or not b:FindFirstChild("VehicleSeat")or b.Health.Value<=0 end end end end
     end)
   end
 end)
 
 Tabs.SeaEvent:AddSection("Kitsune Island / Event")
 local Check_Kitsu = Tabs.SeaEvent:AddParagraph({Title = " Kitsune Island Status ",Content = ""})
-spawn(function()
+SafeTaskSpawn("L5717", function()
   while wait(.2) do
     if workspace.Map:FindFirstChild("KitsuneIsland") or workspace._WorldOrigin.Locations:FindFirstChild("Kitsune Island") then
       Check_Kitsu:SetDesc(" Kitsune Island : True")
@@ -5727,7 +6398,7 @@ local Q = Tabs.SeaEvent:AddToggle("Q", {Title = "Auto Find Kitsune Island", Desc
 Q:OnChanged(function(Value)
   _G.AutofindKitIs = Value
 end)
-spawn(function()
+SafeTaskSpawn("L5730", function()
   while wait() do
     if _G.AutofindKitIs then 
       pcall(function()
@@ -5763,7 +6434,7 @@ local Q = Tabs.SeaEvent:AddToggle("Q", {Title = "Auto Teleport to Shrine Actived
 Q:OnChanged(function(Value)
   _G.tweenShrine = Value
 end)
-spawn(function()
+SafeTaskSpawn("L5766", function()
   while wait(.1) do
     if _G.tweenShrine then
       pcall(function()
@@ -5787,7 +6458,7 @@ local Q = Tabs.SeaEvent:AddToggle("Q", {Title = "Auto Collect Azure Ember", Desc
 Q:OnChanged(function(Value)
   _G.Collect_Ember = Value
 end)
-spawn(function()
+SafeTaskSpawn("L5790", function()
   while wait(.1) do
     if _G.Collect_Ember then
       pcall(function()
@@ -5805,7 +6476,7 @@ local Q = Tabs.SeaEvent:AddToggle("Q", {Title = "Auto Trade Azure Ember", Descri
 Q:OnChanged(function(Value)
   _G.Trade_Ember = Value
 end)
-spawn(function()
+SafeTaskSpawn("L5808", function()
   while wait(.1) do
     if _G.Trade_Ember then
       pcall(function()
@@ -5827,7 +6498,7 @@ end})
 
 Tabs.Raids:AddSection("Dungeon Event / Raiding")
 local RaidS = Tabs.Raids:AddParagraph({Title = " Raiding Status ",Content = ""})
-spawn(function()
+SafeTaskSpawn("L5830", function()
   while wait(.2) do
     pcall(function()      
       if plr.PlayerGui.Main.Timer.Visible == true then
@@ -5847,7 +6518,7 @@ local Q = Tabs.Raids:AddToggle("Q", {Title = "Auto Select Dungeon Chip", Descrip
 Q:OnChanged(function(Value)
   _G.AutoSelectDungeon = Value
 end)
-spawn(function()
+SafeTaskSpawn("L5850", function()
   while wait(Sec) do
     if _G.AutoSelectDungeon then
       pcall(function()
@@ -5909,7 +6580,7 @@ local Q = Tabs.Raids:AddToggle("Q", {Title = "Auto Start Raid", Description = ""
 Q:OnChanged(function(Value)
   _G.Auto_StartRaid = Value
 end)
-spawn(function()
+SafeTaskSpawn("L5912", function()
   while wait(Sec) do
     pcall(function()
       if _G.Auto_StartRaid then
@@ -5942,7 +6613,7 @@ Q = Tabs.Raids:AddToggle("Q", {Title = "Auto Complete Raid [Safety]", Descriptio
 Q:OnChanged(function(Value)
   _G.Raiding = Value
 end)
-spawn(function()
+SafeTaskSpawn("L5945", function()
   pcall(function() 
     while wait(Sec) do
       if _G.Raiding then  
@@ -5973,7 +6644,7 @@ local Q = Tabs.Raids:AddToggle("Q", {Title = "Kill Aura", Description = "", Defa
 Q:OnChanged(function(Value)
   _G.KillH = Value
 end)
-spawn(function()
+SafeTaskSpawn("L5976", function()
   while wait(Sec) do
     if _G.KillH then
       for _, v in pairs(workspace.Enemies:GetChildren()) do
@@ -5995,7 +6666,7 @@ local Q = Tabs.Raids:AddToggle("Q", {Title = "Auto Next Island", Description = "
 Q:OnChanged(function(Value)
   NextIs = Value
 end)
-spawn(function()
+SafeTaskSpawn("L5998", function()
   while wait(Sec) do
     if NextIs then
       if plr.PlayerGui.Main.TopHUDList.RaidTimer.Visible == true then
@@ -6013,7 +6684,7 @@ local Q = Tabs.Raids:AddToggle("Q", {Title = "Auto Awakening", Description = "",
 Q:OnChanged(function(Value)
   _G.Auto_Awakener = Value
 end)
-spawn(function()
+SafeTaskSpawn("L6016", function()
   while wait(Sec) do
     pcall(function()
       if _G.Auto_Awakener then
@@ -6025,7 +6696,7 @@ spawn(function()
 end)	
 Tabs.Combat:AddSection("Combat / Aimbot")
 __indexPlayer = Tabs.Combat:AddParagraph({Title = "All Players On Server :",Content = ""})
-spawn(function()
+SafeTaskSpawn("L6028", function()
   while wait(Sec) do
     pcall(function()
       for i,v in pairs(game:GetService("Players"):GetPlayers()) do
@@ -6054,7 +6725,7 @@ Checking_AimStatus = function()
     return ""  
   end 
 end
-spawn(function() 
+SafeTaskSpawn("L6057", function() 
   while wait(.2) do 
     pcall(function()      
       if _G.AimMethod then 
@@ -6102,7 +6773,7 @@ Q = Tabs.Combat:AddToggle("Q", {Title = "Aimbot Method Skills", Description = ""
 Q:OnChanged(function(Value)
   _G.AimMethod = Value
 end)
-task.spawn(function()
+SafeTaskSpawn("L6105", function()
   while task.wait() do
     pcall(function()
       if _G.AimMethod and ABmethod == "AimBots Skill" then
@@ -6115,7 +6786,7 @@ task.spawn(function()
     end)
   end
 end)
-task.spawn(function()
+SafeTaskSpawn("L6118", function()
   while task.wait() do
     pcall(function()
       if _G.AimMethod and ABmethod == "Auto Aimbots" then
@@ -6137,7 +6808,7 @@ Q = Tabs.Combat:AddToggle("Q", {Title = "Aimbot Camera Closet Players", Descript
 Q:OnChanged(function(Value)
   _G.AimCam = Value
 end)
-task.spawn(function()
+SafeTaskSpawn("L6140", function()
   while task.wait(Sec) do
     pcall(function()
       if _G.AimCam then
@@ -6171,7 +6842,7 @@ Q = Tabs.Combat:AddToggle("Q", {Title = "Instance Mink V3 [ INF ]", Description 
 Q:OnChanged(function(Value)
   InfAblities = Value
 end)
-spawn(function()
+SafeTaskSpawn("L6174", function()
   while wait(.2) do
     pcall(function()
       if InfAblities then
@@ -6212,7 +6883,7 @@ Q = Tabs.Combat:AddToggle("Q", {Title = "Accept Allies", Description = "turn on 
 Q:OnChanged(function(Value)
   _G.AcceptAlly = Value
 end)
-spawn(function()
+SafeTaskSpawn("L6215", function()
   while wait(Sec) do
     if _G.AcceptAlly then
       pcall(function()
@@ -6882,7 +7553,7 @@ GoNPCs = Tabs.Travel:AddToggle("GoNPCs", {Title = "Auto Tween to NPCs", Descript
 GoNPCs:OnChanged(function(Value)
   _G.TPNpc = Value
 end)
-spawn(function()
+SafeTaskSpawn("L6885", function()
   while wait(Sec) do
     if _G.TPNpc then
 	 pcall(function()
@@ -6945,7 +7616,7 @@ RandomFF = Tabs.Fruit:AddToggle("RandomFF", {Title = "Auto Random Fruit", Descri
 RandomFF:OnChanged(function(Value)
   _G.Random_Auto = Value
 end)
-spawn(function()
+SafeTaskSpawn("L6948", function()
   while wait(Sec) do
    	pcall(function()
       if _G.Random_Auto then replicated.Remotes.CommF_:InvokeServer("Cousin","Buy") end 
@@ -6956,7 +7627,7 @@ DropF = Tabs.Fruit:AddToggle("DropF", {Title = "Auto Drop Fruit", Description = 
 DropF:OnChanged(function(Value)
   _G.DropFruit = Value
 end)
-spawn(function()
+SafeTaskSpawn("L6959", function()
   while wait(Sec) do
     if _G.DropFruit then
       pcall(function() DropFruits() end)
@@ -6967,7 +7638,7 @@ StoredF = Tabs.Fruit:AddToggle("StoredF", {Title = "Auto Store Fruit", Descripti
 StoredF:OnChanged(function(Value)
   _G.StoreF = Value
 end)
-spawn(function()
+SafeTaskSpawn("L6970", function()
   while wait(Sec) do
     if _G.StoreF then
       pcall(function() UpdStFruit() end)
@@ -6978,7 +7649,7 @@ TwF = Tabs.Fruit:AddToggle("TwF", {Title = "Auto Tween to Fruit", Description = 
 TwF:OnChanged(function(Value)
   _G.TwFruits = Value
 end)
-spawn(function()
+SafeTaskSpawn("L6981", function()
   while wait(Sec) do
     if _G.TwFruits then
       pcall(function()
@@ -6993,7 +7664,7 @@ BringF = Tabs.Fruit:AddToggle("BringF", {Title = "Auto Collect Fruit", Descripti
 BringF:OnChanged(function(Value)
   _G.InstanceF = Value
 end)
-spawn(function()
+SafeTaskSpawn("L6996", function()
   while wait(Sec) do
     if _G.InstanceF then
       pcall(function() collectFruits(_G.InstanceF) end)
@@ -7234,7 +7905,7 @@ Finished = false, -- Only calls callback when you press enter
 Callback = function(Value)
   _G.JobId = Value
 end})
-spawn(function()
+SafeTaskSpawn("L7237", function()
   while wait(Sec) do
     if _G.JobId then
       pcall(function()
@@ -7298,7 +7969,7 @@ UnPortal = Tabs.Misc:AddToggle("UnPortal", {Title = "Unlock All Portals", Descri
 UnPortal:OnChanged(function(Value)
   _G.PortalUnLock = Value
 end)
-spawn(function()
+SafeTaskSpawn("L7301", function()
   while wait(Sec) do
     pcall(function()
       if _G.PortalUnLock then        
@@ -7441,7 +8112,7 @@ dayornight = Tabs.Misc:AddToggle("dayornight", {Title = "Turn on Time", Descript
 dayornight:OnChanged(function(Value)
   _G.daylightN = Value
 end)
-task.spawn(function()
+SafeTaskSpawn("L7444", function()
   while task.wait() do
     if _G.daylightN then
       if _G.SelectDN == "Day" then
@@ -7465,7 +8136,7 @@ iceWalk = Tabs.Misc:AddToggle("iceWalk", {Title = "Turn on Ice Walk", Descriptio
 iceWalk:OnChanged(function(Value)
   _G.WalkWater = Value
 end)
-spawn(function()
+SafeTaskSpawn("L7468", function()
   while task.wait() do
     if _G.WalkWater then
       pcall(function()
@@ -7603,7 +8274,7 @@ Actived = function()
         end
     end
 end
-task.spawn(function()
+SafeTaskSpawn("L7606", function()
   RunSer.Heartbeat:Connect(function()
     pcall(function()      
       if not _G.Seriality then return end      
@@ -7620,7 +8291,8 @@ task.spawn(function()
     end)
   end)
 end)
-Window:SelectTab(1)
+local __tabOk, __tabErr = pcall(function() Window:SelectTab(1) end)
+if not __tabOk then DebugWarn("UI/SelectTab", __tabErr) end
 end, function(__err)
     local __message = tostring(__err)
     if debug and typeof(debug.traceback) == "function" then
