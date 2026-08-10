@@ -1,57 +1,273 @@
-task.spawn(function()
-    repeat task.wait() until game:IsLoaded() and game.Players.LocalPlayer
-    task.wait(1)
-    local remote = game:GetService("ReplicatedStorage"):WaitForChild("Remotes"):WaitForChild("CommF_")
-    remote:InvokeServer("SetTeam", "Pirates")
-end)
-task.spawn(function()
-    local HttpService = game:GetService("HttpService")
-    local Players = game:GetService("Players")
-    local LP = Players.LocalPlayer
+--[[
+    SlayerHub - versão didática / tolerante a falhas
 
-    repeat task.wait() until game:IsLoaded()
-    repeat task.wait() until LP and LP.Character
+    Objetivos das alterações:
+    1. Mostrar no console onde a inicialização falha.
+    2. Esperar Character/HumanoidRootPart/Data em vez de indexar nil.
+    3. Atualizar Root/Energy depois do respawn.
+    4. Tratar APIs opcionais do executor sem derrubar o hub inteiro.
+    5. Não esconder warn/error: mensagens de erro são essenciais para aprender/debugar.
 
-    local success, err = pcall(function()
-        loadstring(game:HttpGet("https://raw.githubusercontent.com/AnhDangNhoEm/TuanAnhIOS/refs/heads/main/koby"))()
+    IMPORTANTE:
+    Esta camada de compatibilidade não "cria" APIs que o executor não possui.
+    Quando uma API não existir, somente o recurso que depende dela é ignorado/desativado.
+]]
+
+local __SLAYER_PREFIX = "[SlayerHub/Debug]"
+local __SLAYER_WARNED = {}
+
+local function DebugPrint(section, ...)
+    print(__SLAYER_PREFIX, "[" .. tostring(section) .. "]", ...)
+end
+
+local function DebugWarn(section, ...)
+    warn(__SLAYER_PREFIX, "[" .. tostring(section) .. "]", ...)
+end
+
+local function WarnOnce(key, message)
+    if __SLAYER_WARNED[key] then
+        return
+    end
+    __SLAYER_WARNED[key] = true
+    DebugWarn("Compatibilidade", message)
+end
+
+-- Alguns executores não expõem getgenv(). O fallback mantém variáveis do script funcionando.
+if typeof(getgenv) ~= "function" then
+    WarnOnce("getgenv", "getgenv não está disponível; usando _G como fallback.")
+    getgenv = function()
+        return _G
+    end
+end
+
+local ExecutorCapabilities = {
+    hookfunction = typeof(hookfunction) == "function",
+    getrawmetatable = typeof(getrawmetatable) == "function",
+    setreadonly = typeof(setreadonly) == "function",
+    newcclosure = typeof(newcclosure) == "function",
+    getnamecallmethod = typeof(getnamecallmethod) == "function",
+    getgc = typeof(getgc) == "function",
+    getfenv = typeof(getfenv) == "function",
+    getupvalues = typeof(getupvalues) == "function",
+    getsenv = typeof(getsenv) == "function",
+    getconnections = typeof(getconnections) == "function",
+    firetouchinterest = typeof(firetouchinterest) == "function",
+    sethiddenproperty = typeof(sethiddenproperty) == "function",
+    gethui = typeof(gethui) == "function",
+    loadstring = typeof(loadstring) == "function",
+}
+
+DebugPrint("Executor", "Mapa de compatibilidade carregado.")
+for name, supported in pairs(ExecutorCapabilities) do
+    if not supported then
+        DebugPrint("Executor", name .. " = indisponível (recursos relacionados serão ignorados quando possível)")
+    end
+end
+
+local function SafeFireTouchInterest(partA, partB, state)
+    if not ExecutorCapabilities.firetouchinterest then
+        WarnOnce("firetouchinterest", "firetouchinterest indisponível; interações por toque desse recurso foram ignoradas.")
+        return false
+    end
+
+    local ok, err = pcall(function()
+        firetouchinterest(partA, partB, state)
     end)
 
-    if not success then
-        warn("Falha ao executar auto-load:", err)
+    if not ok then
+        DebugWarn("firetouchinterest", err)
+    end
+    return ok
+end
+
+local function SafeSetHiddenProperty(object, property, value)
+    if not ExecutorCapabilities.sethiddenproperty then
+        WarnOnce("sethiddenproperty", "sethiddenproperty indisponível; o recurso que depende dessa propriedade foi ignorado.")
+        return false
+    end
+
+    local ok, err = pcall(function()
+        sethiddenproperty(object, property, value)
+    end)
+
+    if not ok then
+        DebugWarn("sethiddenproperty", err)
+    end
+    return ok
+end
+
+local function SafeHttpLoad(url, label)
+    label = label or url
+
+    if not ExecutorCapabilities.loadstring then
+        DebugWarn(label, "loadstring não está disponível.")
+        return nil
+    end
+
+    local httpOk, sourceOrError = pcall(function()
+        return game:HttpGet(url)
+    end)
+
+    if not httpOk then
+        DebugWarn(label, "HttpGet falhou:", sourceOrError)
+        return nil
+    end
+
+    local compileOk, chunkOrError, compileMessage = pcall(loadstring, sourceOrError)
+    if not compileOk then
+        DebugWarn(label, "loadstring gerou erro:", chunkOrError)
+        return nil
+    end
+
+    if typeof(chunkOrError) ~= "function" then
+        DebugWarn(label, "O código baixado não compilou:", compileMessage or "erro desconhecido")
+        return nil
+    end
+
+    local runOk, result = pcall(chunkOrError)
+    if not runOk then
+        DebugWarn(label, "O código baixado falhou durante a execução:", result)
+        return nil
+    end
+
+    DebugPrint(label, "carregado com sucesso.")
+    return result
+end
+
+-- ===== ETAPA 1: inicialização segura =====
+repeat task.wait() until game:IsLoaded()
+DebugPrint("Bootstrap", "game:IsLoaded() = true")
+
+ply = game:GetService("Players")
+repeat task.wait() until ply.LocalPlayer
+plr = ply.LocalPlayer
+DebugPrint("Bootstrap", "LocalPlayer encontrado:", plr.Name)
+
+-- Root, Humanoid e Energy precisam ser atualizados em todo respawn.
+Character = nil
+Root = nil
+Humanoid = nil
+EnergyObject = nil
+Energy = 0
+
+local function SetupCharacter(character)
+    if not character then
+        return false
+    end
+
+    Character = character
+    Root = character:WaitForChild("HumanoidRootPart", 20)
+    Humanoid = character:WaitForChild("Humanoid", 20)
+    EnergyObject = character:FindFirstChild("Energy") or character:WaitForChild("Energy", 20)
+
+    if not Root then
+        DebugWarn("Character", "HumanoidRootPart não apareceu em 20 segundos.")
+        return false
+    end
+
+    if not Humanoid then
+        DebugWarn("Character", "Humanoid não apareceu em 20 segundos.")
+        return false
+    end
+
+    if EnergyObject then
+        Energy = EnergyObject.Value
+    else
+        WarnOnce("Energy", "Energy não foi encontrada no Character; recursos de energia podem não funcionar.")
+    end
+
+    DebugPrint("Character", "Personagem configurado:", character.Name)
+    return true
+end
+
+local firstCharacter = plr.Character or plr.CharacterAdded:Wait()
+if not SetupCharacter(firstCharacter) then
+    error(__SLAYER_PREFIX .. " não foi possível inicializar o Character.")
+end
+
+plr.CharacterAdded:Connect(function(character)
+    task.defer(function()
+        local ok, err = pcall(SetupCharacter, character)
+        if not ok then
+            DebugWarn("Respawn", err)
+        end
+    end)
+end)
+
+replicated = game:GetService("ReplicatedStorage")
+TeleportService = game:GetService("TeleportService")
+TW = game:GetService("TweenService")
+Lighting = game:GetService("Lighting")
+Enemies = workspace:FindFirstChild("Enemies") or workspace:WaitForChild("Enemies", 30)
+vim1 = game:GetService("VirtualInputManager")
+vim2 = game:GetService("VirtualUser")
+RunSer = game:GetService("RunService")
+Stats = game:GetService("Stats")
+TeamSelf = plr.Team
+plr:GetPropertyChangedSignal("Team"):Connect(function()
+    TeamSelf = plr.Team
+    DebugPrint("Team", "Team atualizada para:", TeamSelf and TeamSelf.Name or "nil")
+end)
+
+local DataFolder = plr:FindFirstChild("Data") or plr:WaitForChild("Data", 30)
+if not DataFolder then
+    error(__SLAYER_PREFIX .. " Player.Data não foi encontrado.")
+end
+
+local LevelObject = DataFolder:FindFirstChild("Level") or DataFolder:WaitForChild("Level", 30)
+if not LevelObject then
+    error(__SLAYER_PREFIX .. " Player.Data.Level não foi encontrado.")
+end
+Lv = LevelObject.Value
+
+Boss = {}
+BringConnections = {}
+MaterialList = {}
+NPCList = {}
+shouldTween = false
+SoulGuitar = false
+KenTest = true
+debug = false
+Brazier1 = false
+Brazier2 = false
+Brazier3 = false
+Sec = 0.1
+ClickState = 0
+Num_self = 25
+
+DebugPrint("Bootstrap", "Serviços e dados principais inicializados.")
+
+-- Auto-team é isolado: se o Remote mudar, o restante do hub continua carregando.
+task.spawn(function()
+    local ok, err = pcall(function()
+        local remotes = replicated:WaitForChild("Remotes", 20)
+        assert(remotes, "ReplicatedStorage.Remotes não encontrado")
+        local remote = remotes:WaitForChild("CommF_", 20)
+        assert(remote, "Remotes.CommF_ não encontrado")
+        remote:InvokeServer("SetTeam", "Pirates")
+    end)
+    if not ok then
+        DebugWarn("AutoTeam", err)
     end
 end)
-do
-  ply = game.Players
-  plr = ply.LocalPlayer
-  Root = plr.Character.HumanoidRootPart
-  replicated = game:GetService("ReplicatedStorage")
-  Lv = game.Players.LocalPlayer.Data.Level.Value
-  TeleportService = game:GetService("TeleportService")
-  TW = game:GetService("TweenService")
-  Lighting = game:GetService("Lighting")  
-  Enemies = workspace.Enemies
-  vim1 = game:GetService("VirtualInputManager")
-  vim2 = game:GetService("VirtualUser")
-  TeamSelf = plr.Team
-  RunSer = game:GetService("RunService")
-  Stats = game:GetService("Stats")  
-  Energy = plr.Character.Energy.Value
-  Boss = {}
-  BringConnections = {}
-  MaterialList = {}
-  NPCList = {}  
-  shouldTween = false
-  SoulGuitar = false
-  KenTest = true
-  debug = false
-  Brazier1 = false
-  Brazier2 = false
-  Brazier3 = false  
-  Sec = 0.1
-  ClickState = 0
-  Num_self = 25
+
+-- Auto-load externo também fica isolado.
+task.spawn(function()
+    SafeHttpLoad(
+        "https://raw.githubusercontent.com/AnhDangNhoEm/TuanAnhIOS/refs/heads/main/koby",
+        "AutoLoad/Koby"
+    )
+end)
+DebugPrint("Bootstrap", "Inicialização principal concluída; verificando PlayerGui.Main.Loading.")
+local playerGui = plr:FindFirstChild("PlayerGui") or plr:WaitForChild("PlayerGui", 30)
+local mainGui = playerGui and (playerGui:FindFirstChild("Main") or playerGui:WaitForChild("Main", 30))
+local loadingGui = mainGui and (mainGui:FindFirstChild("Loading") or mainGui:WaitForChild("Loading", 30))
+
+if loadingGui then
+    DebugPrint("Bootstrap", "PlayerGui.Main.Loading encontrado.")
+else
+    DebugWarn("Bootstrap", "PlayerGui.Main.Loading não apareceu; continuando para permitir diagnóstico das próximas etapas.")
 end
-repeat local start = plr.PlayerGui:WaitForChild("Main"):WaitForChild("Loading") and game:IsLoaded() wait() until start
 World1 = game.PlaceId == 2753915549 or game.PlaceId == 85211729168715
 World2 = game.PlaceId == 4442272183 or game.PlaceId == 79091703265657
 World3 = game.PlaceId == 7449423635 or game.PlaceId == 100117331123089
@@ -90,28 +306,86 @@ weaponSc = function(weapon)
     end
   end
 end
-hookfunction(require(game:GetService("ReplicatedStorage").Effect.Container.Death),function() end)
-hookfunction(require(game:GetService("ReplicatedStorage"):WaitForChild("GuideModule")).ChangeDisplayedNPC,function()end)
-hookfunction(error, function()end)
-hookfunction(warn, function()end)
+-- ===== ETAPA 2: hooks opcionais =====
+-- Nunca substituímos warn/error nesta versão: isso esconderia o motivo dos bugs.
+if ExecutorCapabilities.hookfunction then
+    local hookOk, hookErr = pcall(function()
+        local effect = replicated:FindFirstChild("Effect")
+        local container = effect and effect:FindFirstChild("Container")
+        local deathModule = container and container:FindFirstChild("Death")
+        if deathModule then
+            hookfunction(require(deathModule), function() end)
+        else
+            DebugPrint("Hooks", "Effect.Container.Death não encontrado; hook ignorado.")
+        end
+
+        local guideModule = replicated:FindFirstChild("GuideModule")
+        if guideModule then
+            local guide = require(guideModule)
+            if typeof(guide) == "table" and typeof(guide.ChangeDisplayedNPC) == "function" then
+                hookfunction(guide.ChangeDisplayedNPC, function() end)
+            end
+        else
+            DebugPrint("Hooks", "GuideModule não encontrado; hook ignorado.")
+        end
+    end)
+
+    if not hookOk then
+        DebugWarn("Hooks", hookErr)
+    end
+else
+    DebugPrint("Hooks", "hookfunction indisponível; hooks opcionais desativados.")
+end
 local Rock = workspace:FindFirstChild("Rocks")
 if Rock then Rock:Destroy()end
 gay = (function()
   local lighting = game:GetService("Lighting")
   local lightingLayers = lighting:FindFirstChild("LightingLayers")
-  if lightingLayers and game:GetService("Lighting") and game:GetService("Lighting") then
+  if lightingLayers then
     local darkFog = lightingLayers:FindFirstChild("DarkFog")
-    if darkFog then darkFog:Destroy() end
+    if darkFog then
+      darkFog:Destroy()
+    end
   end
-  local Water = workspace._WorldOrigin["Foam;"]
-  if Water and workspace._WorldOrigin["Foam;"] then Water:Destroy() end        
+
+  -- FindFirstChild evita "attempt to index nil" caso a estrutura do mapa mude.
+  local worldOrigin = workspace:FindFirstChild("_WorldOrigin")
+  local Water = worldOrigin and worldOrigin:FindFirstChild("Foam;")
+  if Water then
+    Water:Destroy()
+  else
+    DebugPrint("WorldCleanup", "_WorldOrigin/Foam; não encontrado; nada para remover.")
+  end
 end)()
 local Attack = {}
 Attack.__index = Attack
-Attack.Alive = function(model) if not model then return end local Humanoid = model:FindFirstChild("Humanoid") return Humanoid and Humanoid.Health > 0 end
-Attack.Pos = function(model,dist) return (Root.Position - mode.Position).Magnitude <= dist end
-Attack.Dist = function(model,dist) return (Root.Position - model:FindFirstChild("HumanoidRootPart").Position).Magnitude <= dist end
-Attack.DistH = function(model,dist) return (Root.Position - model:FindFirstChild("HumanoidRootPart").Position).Magnitude > dist end
+Attack.Alive = function(model)
+  if not model then return false end
+  local targetHumanoid = model:FindFirstChild("Humanoid")
+  return targetHumanoid ~= nil and targetHumanoid.Health > 0
+end
+
+-- O original usava "mode.Position" (typo). Aqui usamos model/HumanoidRootPart com validação.
+Attack.Pos = function(model, dist)
+  if not Root or not model then return false end
+  local targetRoot = model:FindFirstChild("HumanoidRootPart")
+  if not targetRoot then return false end
+  return (Root.Position - targetRoot.Position).Magnitude <= dist
+end
+
+Attack.Dist = function(model, dist)
+  if not Root or not model then return false end
+  local targetRoot = model:FindFirstChild("HumanoidRootPart")
+  if not targetRoot then return false end
+  return (Root.Position - targetRoot.Position).Magnitude <= dist
+end
+
+Attack.DistH = function(model, dist)
+  if not Root or not model then return false end
+  local targetRoot = model:FindFirstChild("HumanoidRootPart")
+  if not targetRoot then return false end
+  return (Root.Position - targetRoot.Position).Magnitude > dist
+end
 Attack.Kill = function(model,Succes)
   if model and Succes then
   if not model:GetAttribute("Locked") then model:SetAttribute("Locked",model.HumanoidRootPart.CFrame) end
@@ -278,24 +552,59 @@ Useskills = function(weapon, skill)
     vim1:SendKeyEvent(false, "Y", false, game);
   end
 end
-local gg = getrawmetatable(game)
-local old = gg.__namecall
-setreadonly(gg, false)
-gg.__namecall = newcclosure(function(...)
-  local method = getnamecallmethod()
-  local args = {...}    
-    if tostring(method) == "FireServer" then
-      if tostring(args[1]) == "RemoteEvent" then
-        if tostring(args[2]) ~= "true" and tostring(args[2]) ~= "false" then
-          if (_G.FarmMastery_G and not SoulGuitar) or (_G.FarmMastery_Dev) or (_G.FarmBlazeEM) or (_G.Prehis_Skills) or (_G.SeaBeast1 or _G.FishBoat or _G.PGB or _G.Leviathan1 or _G.Complete_Trials) or (_G.AimMethod and ABmethod == "AimBots Skill") or (_G.AimMethod and ABmethod == "Auto Aimbots") then
-            args[2] = MousePos
-            return old(unpack(args))
+-- ===== ETAPA 3: interceptação opcional de __namecall =====
+do
+  local canHookNamecall = ExecutorCapabilities.getrawmetatable
+    and ExecutorCapabilities.setreadonly
+    and ExecutorCapabilities.newcclosure
+    and ExecutorCapabilities.getnamecallmethod
+
+  if canHookNamecall then
+    local metaOk, metaErr = pcall(function()
+      local gg = getrawmetatable(game)
+      assert(gg, "getrawmetatable(game) retornou nil")
+      local old = gg.__namecall
+      assert(typeof(old) == "function", "__namecall original não é uma função")
+
+      setreadonly(gg, false)
+      gg.__namecall = newcclosure(function(...)
+        local method = getnamecallmethod()
+        local args = {...}
+
+        if tostring(method) == "FireServer" then
+          if tostring(args[1]) == "RemoteEvent" then
+            if tostring(args[2]) ~= "true" and tostring(args[2]) ~= "false" then
+              if (_G.FarmMastery_G and not SoulGuitar)
+                or (_G.FarmMastery_Dev)
+                or (_G.FarmBlazeEM)
+                or (_G.Prehis_Skills)
+                or (_G.SeaBeast1 or _G.FishBoat or _G.PGB or _G.Leviathan1 or _G.Complete_Trials)
+                or (_G.AimMethod and ABmethod == "AimBots Skill")
+                or (_G.AimMethod and ABmethod == "Auto Aimbots") then
+                  args[2] = MousePos
+                  return old(unpack(args))
+              end
+            end
           end
         end
-      end
+        return old(...)
+      end)
+
+      -- Tenta restaurar somente-leitura quando a API aceitar.
+      pcall(function()
+        setreadonly(gg, true)
+      end)
+    end)
+
+    if not metaOk then
+      DebugWarn("NamecallHook", metaErr)
+    else
+      DebugPrint("NamecallHook", "hook instalado com sucesso.")
     end
-  return old(...)
-end)
+  else
+    DebugPrint("NamecallHook", "APIs necessárias indisponíveis; recurso desativado.")
+  end
+end
 GetConnectionEnemies = function(a)
   for i,v in pairs(replicated:GetChildren()) do
     if v:IsA("Model") and  ((typeof(a) == "table" and table.find(a, v.Name)) or v.Name == a) and v:FindFirstChild("Humanoid") and v.Humanoid.Health > 0 then
@@ -503,26 +812,70 @@ GetWP = function(nametool)
   return false
 end 
 getInfinity_Ability = function(Method, Var)
-  if not Root then return end
+  if not Root then
+    DebugPrint("InfinityAbility", "Root ainda não está disponível.")
+    return
+  end
+
   if Method == "Soru" and Var then
-    for _,gc in next, getgc() do
-      if plr.Character.Soru then
-        if ((typeof(gc) == "function") and (getfenv(gc).script == plr.Character.Soru)) then
-          for _, v in next, getupvalues(gc) do
-            if (typeof(v) == "table") then
-              repeat wait(Sec) v.LastUse = 0 until not Var or (plr.Character.Humanoid.Health <= 0)
+    if not (ExecutorCapabilities.getgc and ExecutorCapabilities.getfenv and ExecutorCapabilities.getupvalues) then
+      WarnOnce("SoruApis", "Soru requer getgc/getfenv/getupvalues; opção ignorada neste executor.")
+      return
+    end
+
+    local character = plr.Character
+    local soruScript = character and character:FindFirstChild("Soru")
+    if not soruScript then
+      DebugPrint("InfinityAbility", "Soru não encontrado no Character.")
+      return
+    end
+
+    local ok, err = pcall(function()
+      for _, gc in next, getgc() do
+        if typeof(gc) == "function" then
+          local envOk, env = pcall(getfenv, gc)
+          if envOk and env and env.script == soruScript then
+            local valuesOk, values = pcall(getupvalues, gc)
+            if valuesOk and typeof(values) == "table" then
+              for _, value in next, values do
+                if typeof(value) == "table" then
+                  repeat
+                    task.wait(Sec)
+                    value.LastUse = 0
+                  until not Var or not plr.Character or plr.Character.Humanoid.Health <= 0
+                end
+              end
             end
           end
         end
       end
-    end    
-  elseif Method == "Energy" and Var then
-    plr.Character.Energy.Changed:connect(function()
-      if Var then plr.Character.Energy.Value = Energy end 
     end)
+
+    if not ok then
+      DebugWarn("InfinityAbility/Soru", err)
+    end
+
+  elseif Method == "Energy" and Var then
+    local character = plr.Character
+    local energy = character and character:FindFirstChild("Energy")
+    if not energy then
+      DebugPrint("InfinityAbility", "Energy não encontrada.")
+      return
+    end
+
+    energy.Changed:Connect(function()
+      if Var and energy.Parent then
+        energy.Value = Energy
+      end
+    end)
+
   elseif Method == "Observation" and Var then
-    local VisionRadius = plr.VisionRadius
-    VisionRadius.Value = math.huge
+    local VisionRadius = plr:FindFirstChild("VisionRadius")
+    if VisionRadius then
+      VisionRadius.Value = math.huge
+    else
+      DebugPrint("InfinityAbility", "VisionRadius não encontrado.")
+    end
   end
 end
 Hop = function()
@@ -694,8 +1047,36 @@ QuestNeta = function()
   }
 end
 
-local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
-local Window = Fluent:CreateWindow({Title = "Slayerhub",SubTitle = "| By:Slayer ",TabWidth = 180,Size = UDim2.fromOffset(660, 440),Acrylic = false,Theme = "Dark",MinimizeKey = Enum.KeyCode.End})
+-- ===== ETAPA 4: UI externa =====
+local Fluent = SafeHttpLoad(
+  "https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua",
+  "Fluent UI"
+)
+
+if not Fluent then
+  DebugWarn("Fluent UI", "Não foi possível carregar a biblioteca. O script será encerrado antes de criar a interface.")
+  return
+end
+
+local windowOk, windowOrError = pcall(function()
+  return Fluent:CreateWindow({
+    Title = "Slayerhub",
+    SubTitle = "| By:Slayer ",
+    TabWidth = 180,
+    Size = UDim2.fromOffset(660, 440),
+    Acrylic = false,
+    Theme = "Dark",
+    MinimizeKey = Enum.KeyCode.End
+  })
+end)
+
+if not windowOk then
+  DebugWarn("Fluent UI", "CreateWindow falhou:", windowOrError)
+  return
+end
+
+local Window = windowOrError
+DebugPrint("Fluent UI", "janela criada com sucesso.")
 	
 -- Services
 local CoreGui = game:GetService("CoreGui")
@@ -705,8 +1086,26 @@ local UserInputService = game:GetService("UserInputService")
 -- ScreenGui
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "ControlButtonGUI"
-ScreenGui.Parent = CoreGui
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+-- Alguns ambientes preferem gethui(); caso falhe, tentamos CoreGui e depois PlayerGui.
+local guiParent = CoreGui
+if ExecutorCapabilities.gethui then
+    local huiOk, hui = pcall(gethui)
+    if huiOk and hui then
+        guiParent = hui
+    end
+end
+
+local parentOk, parentErr = pcall(function()
+    ScreenGui.Parent = guiParent
+end)
+
+if not parentOk then
+    DebugWarn("GUI", "Não foi possível usar CoreGui/gethui:", parentErr)
+    ScreenGui.Parent = plr:WaitForChild("PlayerGui")
+    DebugPrint("GUI", "Usando PlayerGui como fallback.")
+end
 
 -- ImageButton
 local ToggleButton = Instance.new("ImageButton")
@@ -714,7 +1113,7 @@ ToggleButton.Size = UDim2.new(0, 50, 0, 50)
 ToggleButton.Position = UDim2.new(0.15, 0, 0.15, 0)
 ToggleButton.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
 ToggleButton.BorderSizePixel = 0
-ToggleButton.Image = "rbxassetid://91447350341060" -- sua imagem
+ToggleButton.Image = "rbxassetid://71492832762953" -- sua imagem
 ToggleButton.Parent = ScreenGui
 
 -- UICorner para bordas arredondadas
@@ -1965,7 +2364,7 @@ spawn(function()
 	      for i,v in pairs(workspace:GetDescendants()) do
 	        if v.Name == "Apple" then
 	          v.Handle.CFrame = plr.Character.HumanoidRootPart.CFrame * CFrame.new(0,1,10) wait()
-		      firetouchinterest(plr.Character.HumanoidRootPart,v.Handle,0) wait()		    
+		      SafeFireTouchInterest(plr.Character.HumanoidRootPart,v.Handle,0) wait()		    
 	        end
 	      end
 	    elseif not GetBP("Banana") then
@@ -1973,7 +2372,7 @@ spawn(function()
 	      for i,v in pairs(workspace:GetDescendants()) do
 	        if v.Name == "Banana" then
 	          v.Handle.CFrame = plr.Character.HumanoidRootPart.CFrame * CFrame.new(0,1,10) wait()
-		      firetouchinterest(plr.Character.HumanoidRootPart,v.Handle,0) wait()		    
+		      SafeFireTouchInterest(plr.Character.HumanoidRootPart,v.Handle,0) wait()		    
 	        end
 	      end	    
 	    elseif not GetBP("Pineapple") then
@@ -1981,7 +2380,7 @@ spawn(function()
 	      for i,v in pairs(workspace:GetDescendants()) do
 	        if v.Name == "Pineapple" then
 	          v.Handle.CFrame = plr.Character.HumanoidRootPart.CFrame * CFrame.new(0,1,10) wait()
-		      firetouchinterest(plr.Character.HumanoidRootPart,v.Handle,0) wait()		    
+		      SafeFireTouchInterest(plr.Character.HumanoidRootPart,v.Handle,0) wait()		    
 	        end
 	      end	    
 	    end	  
@@ -3252,8 +3651,8 @@ spawn(function()
 		    if workspace.Map.Desert.Burn.Part.Transparency == 0 then
 		      if plr.Backpack:FindFirstChild("Torch") or plr.Character:FindFirstChild("Torch") then
 		        EquipWeapon("Torch")
-		        firetouchinterest(plr.Character.Torch.Handle,workspace.Map.Desert.Burn.Fire,0)
-			    firetouchinterest(plr.Character.Torch.Handle,workspace.Map.Desert.Burn.Fire,1)
+		        SafeFireTouchInterest(plr.Character.Torch.Handle,workspace.Map.Desert.Burn.Fire,0)
+			    SafeFireTouchInterest(plr.Character.Torch.Handle,workspace.Map.Desert.Burn.Fire,1)
 		   	    _tp(CFrame.new(1114.61475, 5.04679728, 4350.22803, -0.648466587, -1.28799094e-09, 0.761243105, -5.70652914e-10, 1, 1.20584542e-09, -0.761243105, 3.47544882e-10, -0.648466587))
 		      else
 		        _tp(CFrame.new(-1610.00757, 11.5049858, 164.001587, 0.984807551, -0.167722285, -0.0449818149, 0.17364943, 0.951244235, 0.254912198, 3.42372805e-05, -0.258850515, 0.965917408))                    end
@@ -4364,7 +4763,7 @@ spawn(function()
 	    for _, v in pairs(workspace.Characters:GetChildren()) do
           if v.Name ~= plr.Name then
             if v.Humanoid.Health > 0 and v:FindFirstChild("HumanoidRootPart") and v.Parent and (Root.Position - v.HumanoidRootPart.Position).Magnitude <= 250 then
-              repeat task.wait() EquipWeapon(_G.SelectWeapon) _tp(v.HumanoidRootPart.CFrame * CFrame.new(0,0,15)) sethiddenproperty(plr, "SimulationRadius", math.huge)until _G.Defeating == false or v.Humanoid.Health <= 0 or not v.Parent or not v:FindFirstChild("HumanoidRootPart") or not v:FindFirstChild("Humanoid")
+              repeat task.wait() EquipWeapon(_G.SelectWeapon) _tp(v.HumanoidRootPart.CFrame * CFrame.new(0,0,15)) SafeSetHiddenProperty(plr, "SimulationRadius", math.huge)until _G.Defeating == false or v.Humanoid.Health <= 0 or not v.Parent or not v:FindFirstChild("HumanoidRootPart") or not v:FindFirstChild("Humanoid")
             end
           end
         end
@@ -5369,7 +5768,7 @@ spawn(function()
         if Attack.Alive(v) then
           pcall(function()
             repeat wait(Sec)
-              sethiddenproperty(plr, "SimulationRadius", math.huge)
+              SafeSetHiddenProperty(plr, "SimulationRadius", math.huge)
               v:BreakJoints()
               v.Humanoid.Health = 0
               v.HumanoidRootPart.CanCollide = false
@@ -6950,7 +7349,7 @@ function AttackNoCoolDown()
         localScript = playerScripts:FindFirstChildOfClass("LocalScript")
     end
     local hitFunction
-    if getsenv then
+    if ExecutorCapabilities.getsenv then
         local success, scriptEnv = pcall(getsenv, localScript)
         if success and scriptEnv then
             hitFunction = scriptEnv._G.SendHitsToServer
@@ -6968,7 +7367,30 @@ end
 CameraShakerR = require(game.ReplicatedStorage.Util.CameraShaker)
 CameraShakerR:Stop()
 get_Monster=function()for a,b in pairs(workspace.Enemies:GetChildren())do local c=b:FindFirstChild("UpperTorso")or b:FindFirstChild("Head")if b:FindFirstChild("HumanoidRootPart",true)and c then if(b.Head.Position-plr.Character.HumanoidRootPart.Position).Magnitude<=50 then return true,c.Position end end end;for a,d in pairs(workspace.SeaBeasts:GetChildren())do if d:FindFirstChild("HumanoidRootPart")and d:FindFirstChild("Health")and d.Health.Value>0 then return true,d.HumanoidRootPart.Position end end;for a,d in pairs(workspace.Enemies:GetChildren())do if d:FindFirstChild("Health")and d.Health.Value>0 and d:FindFirstChild("VehicleSeat")then return true,d.Engine.Position end end end
-Actived=function()local a=game.Players.LocalPlayer.Character:FindFirstChildOfClass("Tool")for b,c in next,getconnections(a.Activated)do if typeof(c.Function)=='function'then getupvalues(c.Function)end end end
+Actived = function()
+    local character = plr.Character
+    local tool = character and character:FindFirstChildOfClass("Tool")
+    if not tool then
+        return
+    end
+
+    if not ExecutorCapabilities.getconnections then
+        WarnOnce("getconnections", "getconnections indisponível; Actived() foi ignorado.")
+        return
+    end
+
+    local ok, connectionsOrError = pcall(getconnections, tool.Activated)
+    if not ok then
+        DebugWarn("Actived/getconnections", connectionsOrError)
+        return
+    end
+
+    for _, connection in next, connectionsOrError do
+        if typeof(connection.Function) == "function" and ExecutorCapabilities.getupvalues then
+            pcall(getupvalues, connection.Function)
+        end
+    end
+end
 task.spawn(function()
   RunSer.Heartbeat:Connect(function()
     pcall(function()      
